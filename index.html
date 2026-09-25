@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#121212">
+<meta name="color-scheme" content="dark only">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gym Log">
+<meta name="apple-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no,email=no,address=no">
+<meta name="supported-color-schemes" content="dark">
+<title>Gym Log</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23121212'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23f2c230' stroke-width='4'/%3E%3Ccircle cx='16' cy='16' r='2' fill='%23f2c230'/%3E%3C/svg%3E">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Paleta: base #121212 + colores de los discos olímpicos (amarillo = 15 kg, rojo = 25 kg)
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: '#121212',
+          surface: '#1b1b1d',
+          raised: '#262629',
+          line: '#303035',
+          chalk: '#ececee',
+          mute: '#9d9da6',
+          plate: '#f2c230',
+          danger: '#ff6369'
+        }
+      }
+    }
+  };
+</script>
+<style>
+  :root { --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px); }
+  html { background: #121212; -webkit-text-size-adjust: 100%; }
+  body {
+    background: #121212; color: #ececee;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation; overscroll-behavior-y: none;
+  }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .num { font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid #f2c230; outline-offset: 2px; }
+  input:focus-visible { outline: none; }
+  input::placeholder { color: #5d5d64; }
+  .press { transition: transform .08s ease; }
+  .press:active { transform: scale(.97); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+
+<body class="bg-ink text-chalk antialiased">
+
+<div class="mx-auto w-full max-w-xl min-h-screen flex flex-col">
+  <header id="header" class="sticky top-0 z-20 bg-ink/95 backdrop-blur px-4 pb-3" style="padding-top: calc(var(--safe-top) + 12px)"></header>
+  <main id="view" class="flex-1 px-4" style="padding-bottom: calc(var(--safe-bottom) + 112px)"></main>
+</div>
+
+<nav class="fixed bottom-0 inset-x-0 z-30 bg-ink border-t border-line" style="padding-bottom: var(--safe-bottom)" aria-label="Navegación principal">
+  <div id="tabs" class="mx-auto max-w-xl grid grid-cols-4"></div>
+</nav>
+
+<div id="modal-root"></div>
+<div id="toast" role="status" aria-live="polite" style="display:none"></div>
+
+<script>
+(() => {
+'use strict';
+
+/* =========================================================
+   Utilidades
+   ========================================================= */
+const KEY = 'gymlog.v1';
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+const norm = s => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+const parseNum = v => { const n = parseFloat(String(v ?? '').replace(',', '.')); return isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : 0; };
+const validDate = v => { const d = new Date(v); return isNaN(d) ? new Date().toISOString() : d.toISOString(); };
+const fmt = n => Number(n).toLocaleString('es-ES', { maximumFractionDigits: 2 });
+const fmtSet = s => s.kg > 0 ? `${s.reps} × ${fmt(s.kg)} kg` : `${s.reps} reps`;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const fmtDate = iso => {
+  const d = new Date(iso);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) });
+};
+const fmtLong = iso => new Date(iso).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const daysSince = iso => {
+  const a = new Date(); a.setHours(0, 0, 0, 0);
+  const b = new Date(iso); b.setHours(0, 0, 0, 0);
+  return Math.round((a - b) / 864e5);
+};
+
+/* =========================================================
+   Iconos (SVG en línea)
+   ========================================================= */
+const ICONS = {
+  back: '<path d="M15 18l-6-6 6-6"/>',
+  chevron: '<path d="M9 6l6 6-6 6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12M9 7V4h6v3"/>',
+  edit: '<path d="M4 20h4L19 9a2.8 2.8 0 00-4-4L4 16v4z"/>',
+  list: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+  dumbbell: '<path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/>',
+  chart: '<path d="M4 19V5M4 19h16M8 15l3-4 3 2 5-6"/>',
+  sliders: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
+  upload: '<path d="M12 16V5M7 9l5-5 5 5M5 20h14"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>'
+};
+const icon = (name, cls = 'w-6 h-6') =>
+  `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+
+/* =========================================================
+   Estado y persistencia (localStorage)
+   ========================================================= */
+const emptyState = () => ({ version: 1, routines: [], workouts: [], draft: null, meta: { lastExport: null } });
+
+// Valida y limpia rutinas + entrenos (sirve para cargar y para importar)
+function normalize(src) {
+  const data = src && src.data ? src.data : src;
+  if (!data || !Array.isArray(data.routines) || !Array.isArray(data.workouts)) throw new Error('Formato no válido');
+  const routines = data.routines.map(r => ({
+    id: String(r.id || uid()),
+    name: clean(r.name) || 'Rutina',
+    exercises: (Array.isArray(r.exercises) ? r.exercises : [])
+      .map(x => ({ id: String(x.id || uid()), name: clean(x.name) }))
+      .filter(x => x.name)
+  }));
+  const workouts = data.workouts.map(w => ({
+    id: String(w.id || uid()),
+    date: validDate(w.date),
+    routineId: w.routineId ? String(w.routineId) : null,
+    routineName: clean(w.routineName) || 'Entreno',
+    entries: (Array.isArray(w.entries) ? w.entries : []).map(e => ({
+      exerciseName: clean(e.exerciseName),
+      sets: (Array.isArray(e.sets) ? e.sets : []).map(t => ({ reps: Math.round(parseNum(t.reps)), kg: parseNum(t.kg) }))
+    })).filter(e => e.exerciseName && e.sets.length)
+  })).filter(w => w.entries.length);
+  return { routines, workouts };
+}
+
+function sanitizeDraft(d) {
+  if (!d || !Array.isArray(d.entries)) return null;
+  const entries = d.entries.map(e => ({
+    exerciseName: clean(e.exerciseName),
+    notes: String(e.notes ?? '').slice(0, 500).trim(),
+    completed: Boolean(e.completed),
+    sets: (Array.isArray(e.sets) ? e.sets : []).map(s => ({ reps: String(s.reps ?? ''), kg: String(s.kg ?? '') }))
+  })).filter(e => e.exerciseName);
+  if (!entries.length) return null;
+  return {
+    id: String(d.id || uid()),
+    routineId: d.routineId ? String(d.routineId) : null,
+    routineName: clean(d.routineName) || 'Entreno',
+    startedAt: validDate(d.startedAt),
+    timerWork: Number(d.timerWork) || 60,
+    timerRest: Number(d.timerRest) || 90,
+    entries
+  };
+}
+
+function load() {
+  const s = emptyState();
+  let raw = null;
+  try { raw = localStorage.getItem(KEY); } catch (e) { /* almacenamiento bloqueado */ }
+  if (!raw) return s;
+  try {
+    const p = JSON.parse(raw);
+    const n = normalize(p);
+    s.routines = n.routines;
+    s.workouts = n.workouts;
+    s.draft = sanitizeDraft(p.draft);
+    s.meta.lastExport = p.meta && p.meta.lastExport ? validDate(p.meta.lastExport) : null;
+  } catch (e) {
+    // Datos ilegibles: se conserva una copia en bruto para no perderlos al guardar de nuevo
+    try { localStorage.setItem(KEY + '.corrupto', raw); } catch (_) {}
+    console.warn('Datos ilegibles; copia en bruto en ' + KEY + '.corrupto', e);
+  }
+  return s;
+}
+
+let state = load();
+let saveWarned = false;
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(state)); }
+  catch (e) {
+    if (!saveWarned) { saveWarned = true; toast('No se pudo guardar en este navegador. Exporta tus datos ya.', 'error'); }
+  }
+}
+try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+
+/* =========================================================
+   Estado de la interfaz (no se guarda)
+   ========================================================= */
+const ui = { tab: 'routines', routineId: null, exercise: null, filter: '' };
+const currentRoutine = () => {
+  const r = state.routines.find(x => x.id === ui.routineId);
+  if (!r) ui.routineId = null;
+  return r || null;
+};
+const currentExercise = () => {
+  if (!ui.exercise) return null;
+  const it = buildHistory().find(i => i.key === ui.exercise);
+  if (!it) ui.exercise = null;
+  return it || null;
+};
+
+/* =========================================================
+   Histórico (se agrupa por nombre de ejercicio)
+   ========================================================= */
+function buildHistory() {
+  const map = new Map();
+  const ws = [...state.workouts].sort((a, b) => new Date(a.date) - new Date(b.date));
+  for (const w of ws) {
+    for (const e of w.entries) {
+      const k = norm(e.exerciseName);
+      if (!map.has(k)) map.set(k, { key: k, name: e.exerciseName, sessions: [] });
+      const it = map.get(k);
+      it.name = e.exerciseName;
+      it.sessions.push({
+        wid: w.id, date: w.date, routine: w.routineName, sets: e.sets,
+        maxKg: Math.max(...e.sets.map(s => s.kg)),
+        maxReps: Math.max(...e.sets.map(s => s.reps))
+      });
+    }
+  }
+  return [...map.values()].map(it => {
+    const useKg = it.sessions.some(s => s.maxKg > 0);
+    const val = s => useKg ? s.maxKg : s.maxReps;
+    return { ...it, useKg, val, best: Math.max(...it.sessions.map(val)), last: it.sessions[it.sessions.length - 1].date };
+  }).sort((a, b) => new Date(b.last) - new Date(a.last));
+}
+
+function lastSets(name) {
+  const k = norm(name);
+  let best = null;
+  for (const w of state.workouts) {
+    if (best && new Date(w.date) <= new Date(best.date)) continue;
+    const e = w.entries.find(x => norm(x.exerciseName) === k);
+    if (e) best = { date: w.date, sets: e.sets };
+  }
+  return best;
+}
+
+/* =========================================================
+   Avisos y diálogos
+   ========================================================= */
+let toastTimer;
+function toast(msg, kind = 'ok') {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = `fixed left-1/2 -translate-x-1/2 z-[60] max-w-[90vw] text-center px-5 py-3 rounded-full font-semibold text-sm ${kind === 'error' ? 'bg-danger text-ink' : 'bg-chalk text-ink'}`;
+  t.style.bottom = 'calc(var(--safe-bottom) + 84px)';
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = 'none'; }, kind === 'error' ? 4500 : 2400);
+}
+
+function sheet(inner, { input = false } = {}) {
+  return new Promise(resolve => {
+    const wrap = document.createElement('div');
+    wrap.className = 'fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70';
+    wrap.innerHTML = `<form role="dialog" aria-modal="true" class="w-full max-w-xl sm:max-w-md bg-surface border border-line rounded-t-3xl sm:rounded-3xl p-5" style="padding-bottom: calc(var(--safe-bottom) + 20px)">${inner}</form>`;
+    const form = wrap.firstElementChild;
+    const done = v => { document.removeEventListener('keydown', onKey); wrap.remove(); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(null); };
+    document.addEventListener('keydown', onKey);
+    wrap.addEventListener('click', e => { if (e.target === wrap) done(null); });
+    form.addEventListener('submit', e => { e.preventDefault(); done(input ? form.elements.namedItem('value').value : true); });
+    form.querySelector('[data-cancel]').addEventListener('click', () => done(null));
+    $('#modal-root').appendChild(wrap);
+    const f = form.elements.namedItem('value');
+    if (f) { f.focus(); f.select(); }
+  });
+}
+
+const promptDialog = ({ title, value = '', placeholder = '', confirmLabel = 'Guardar' }) => sheet(`
+  <h2 class="text-xl font-bold">${esc(title)}</h2>
+  <input name="value" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="60" autocomplete="off" autocapitalize="sentences" enterkeyhint="done"
+    class="mt-4 w-full h-14 rounded-xl bg-raised border border-line px-4 text-lg outline-none focus:border-plate">
+  <div class="mt-4 grid grid-cols-2 gap-3">
+    <button type="button" data-cancel class="press h-14 rounded-xl bg-raised font-semibold">Cancelar</button>
+    <button type="submit" class="press h-14 rounded-xl bg-plate text-ink font-bold">${esc(confirmLabel)}</button>
+  </div>`, { input: true });
+
+const confirmDialog = ({ title, text, confirmLabel = 'Confirmar', danger = false }) => sheet(`
+  <h2 class="text-xl font-bold">${esc(title)}</h2>
+  <p class="mt-2 text-mute">${esc(text)}</p>
+  <div class="mt-5 grid grid-cols-2 gap-3">
+    <button type="button" data-cancel class="press h-14 rounded-xl bg-raised font-semibold">Cancelar</button>
+    <button type="submit" class="press h-14 rounded-xl ${danger ? 'bg-danger' : 'bg-plate'} text-ink font-bold">${esc(confirmLabel)}</button>
+  </div>`);
+
+/* =========================================================
+   Componentes comunes
+   ========================================================= */
+const header = (title, { back = '', sub = '', right = '' } = {}) => `
+  <div class="flex items-center gap-1 min-h-[52px]">
+    ${back ? `<button data-action="${back}" class="press -ml-2 w-12 h-12 shrink-0 grid place-items-center rounded-full" aria-label="Volver">${icon('back')}</button>` : ''}
+    <div class="min-w-0 flex-1">
+      <h1 class="text-3xl font-extrabold tracking-tight truncate">${esc(title)}</h1>
+      ${sub ? `<p class="text-sm text-mute -mt-0.5">${esc(sub)}</p>` : ''}
+    </div>
+    ${right}
+  </div>`;
+
+const emptyBlock = (title, text, extra = '') => `
+  <div class="mt-12 text-center px-4">
+    <div class="mx-auto w-16 h-16 rounded-full border-4 border-plate/50 grid place-items-center"><div class="w-3 h-3 rounded-full bg-plate/50"></div></div>
+    <p class="mt-5 text-xl font-bold">${title}</p>
+    <p class="mt-1 text-mute">${text}</p>
+    ${extra}
+  </div>`;
+
+const TABS = [['routines', 'Rutinas', 'list'], ['train', 'Entrenar', 'dumbbell'], ['timer', 'Temporizador', 'clock'], ['history', 'Histórico', 'chart'], ['settings', 'Ajustes', 'sliders']];
+function renderTabs() {
+  $('#tabs').innerHTML = TABS.map(([id, label, ic]) => `
+    <button data-action="tab" data-tab="${id}" ${ui.tab === id ? 'aria-current="page"' : ''}
+      class="press relative h-16 flex flex-col items-center justify-center gap-1 text-xs font-semibold ${ui.tab === id ? 'text-plate' : 'text-mute'}">
+      ${icon(ic)}<span>${label}</span>
+      ${(id === 'train' || id === 'timer') && state.draft ? '<span class="absolute top-2 right-[calc(50%-22px)] w-2.5 h-2.5 rounded-full bg-plate"></span>' : ''}
+    </button>`).join('');
+}
+
+/* =========================================================
+   Pantalla 1: Rutinas
+   ========================================================= */
+function viewRoutines() {
+  const cards = state.routines.map(r => {
+    const names = r.exercises.map(x => x.name).join(', ');
+    return `
+    <article class="rounded-2xl bg-surface border border-line p-4">
+      <h2 class="text-xl font-bold truncate">${esc(r.name)}</h2>
+      <p class="mt-0.5 text-sm text-mute">${plural(r.exercises.length, 'ejercicio', 'ejercicios')}</p>
+      ${names ? `<p class="mt-2 text-sm text-mute/80 line-clamp-2">${esc(names)}</p>` : ''}
+      <div class="mt-4 grid grid-cols-2 gap-3">
+        <button data-action="routine-open" data-id="${esc(r.id)}" class="press h-14 rounded-xl bg-raised font-semibold">Editar</button>
+        <button data-action="train-start" data-id="${esc(r.id)}" class="press h-14 rounded-xl border-2 border-plate text-plate font-bold">Entrenar</button>
+      </div>
+    </article>`;
+  }).join('');
+
+  return `
+    <button data-action="routine-new" class="press w-full h-16 rounded-2xl bg-plate text-ink font-bold text-xl flex items-center justify-center gap-2">${icon('plus')} Nueva rutina</button>
+    ${state.routines.length
+      ? `<div class="mt-4 space-y-3">${cards}</div>`
+      : emptyBlock('Todavía no tienes rutinas', 'Crea la primera, por ejemplo «Pecho y hombro», y añade sus ejercicios.')}`;
+}
+
+function viewRoutineDetail(r) {
+  const rows = r.exercises.map(x => `
+    <li class="flex items-center gap-1 rounded-xl bg-surface border border-line pl-4 pr-1 min-h-[3.5rem]">
+      <span class="flex-1 min-w-0 text-lg font-semibold truncate">${esc(x.name)}</span>
+      <button data-action="ex-rename" data-id="${esc(x.id)}" aria-label="Renombrar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-mute">${icon('edit', 'w-5 h-5')}</button>
+      <button data-action="ex-del" data-id="${esc(x.id)}" aria-label="Quitar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-danger">${icon('trash', 'w-5 h-5')}</button>
+    </li>`).join('');
+
+  return `
+    <form data-form="ex-add" class="flex gap-2" autocomplete="off">
+      <input id="exName" name="exname" maxlength="60" placeholder="Nuevo ejercicio, ej. Press banca" enterkeyhint="done" autocapitalize="sentences"
+        class="flex-1 min-w-0 h-14 rounded-xl bg-surface border border-line px-4 text-lg outline-none focus:border-plate">
+      <button type="submit" class="press h-14 px-5 rounded-xl bg-plate text-ink font-bold">Añadir</button>
+    </form>
+    <ul class="mt-4 space-y-2">
+      ${rows || '<li class="text-mute text-center py-8">Esta rutina aún no tiene ejercicios. Añade el primero arriba.</li>'}
+    </ul>
+    <button data-action="routine-delete" class="press mt-8 w-full h-14 rounded-xl border border-danger/50 text-danger font-semibold">Borrar rutina</button>`;
+}
+
+/* =========================================================
+   Pantalla 2: Entrenamiento
+   ========================================================= */
+function viewTrain() {
+  const d = state.draft;
+
+  if (!d) {
+    if (!state.routines.length) {
+      return emptyBlock('Primero crea una rutina', 'En Rutinas añade una con sus ejercicios. Después podrás entrenarla desde aquí.',
+        `<button data-action="tab" data-tab="routines" class="press mt-6 h-14 px-6 rounded-xl bg-plate text-ink font-bold">Ir a Rutinas</button>`);
+    }
+    return `
+      <p class="text-mute mb-3">Elige la rutina de hoy.</p>
+      <div class="space-y-3">
+        ${state.routines.map(r => `
+          <button data-action="train-start" data-id="${esc(r.id)}" class="press w-full min-h-[5rem] rounded-2xl bg-surface border border-line px-5 py-3 flex items-center justify-between gap-3 text-left">
+            <span class="min-w-0">
+              <span class="block text-xl font-bold truncate">${esc(r.name)}</span>
+              <span class="block text-sm text-mute">${plural(r.exercises.length, 'ejercicio', 'ejercicios')}</span>
+            </span>
+            <span class="text-plate shrink-0">${icon('chevron')}</span>
+          </button>`).join('')}
+      </div>`;
+  }
+
+  const cards = d.entries.map((e, i) => {
+    const last = lastSets(e.exerciseName);
+    const hint = last
+      ? `Última vez: ${last.sets.map(fmtSet).join(', ')}`
+      : 'Primera vez con este ejercicio';
+    const rows = e.sets.map((s, j) => {
+      const p = last ? (last.sets[j] || last.sets[last.sets.length - 1]) : null;
+      return `
+      <div class="grid grid-cols-[3rem_1fr_1fr_3rem] gap-2 mt-2 items-center">
+        <div class="h-14 grid place-items-center">
+          <span class="w-10 h-10 rounded-full border-2 border-plate/70 grid place-items-center font-bold num">${j + 1}</span>
+        </div>
+        <input data-field="reps" data-i="${i}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
+          value="${esc(s.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Repeticiones de la serie ${j + 1}"
+          class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
+        <input data-field="kg" data-i="${i}" data-j="${j}" inputmode="decimal" autocomplete="off"
+          value="${esc(s.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos de la serie ${j + 1}"
+          class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
+        <button data-action="set-del" data-i="${i}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press h-14 grid place-items-center text-mute">${icon('x', 'w-5 h-5')}</button>
+      </div>`;
+    }).join('');
+
+    return `
+    <section class="rounded-2xl bg-surface border-2 p-4 mb-4 transition-colors ${e.completed ? 'border-plate bg-surface/80' : 'border-line'}">
+      <div class="flex items-start justify-between gap-2 mb-2">
+        <h2 class="text-xl font-bold flex-1">${esc(e.exerciseName)}</h2>
+        <button data-action="ex-toggle" data-i="${i}" aria-label="${e.completed ? 'Marcar como pendiente' : 'Marcar como completado'}" class="press -mt-1 -mr-1 text-${e.completed ? 'plate' : 'mute'}">${icon('check', 'w-6 h-6')}</button>
+      </div>
+      <p class="text-sm text-mute">${esc(hint)}</p>
+      ${e.sets.length ? `<div class="mt-3 grid grid-cols-[3rem_1fr_1fr_3rem] gap-2 text-sm text-mute"><span class="text-center">Serie</span><span class="text-center">Reps</span><span class="text-center">Kilos</span><span></span></div>` : ''}
+      ${rows}
+      <button data-action="set-add" data-i="${i}" class="press mt-3 w-full h-14 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2">${icon('plus', 'w-5 h-5')} Añadir serie</button>
+      <textarea data-field="notes" data-i="${i}" placeholder="Notas sobre este ejercicio (respiración, forma, cómo te has sentido...)" maxlength="500"
+        class="mt-3 w-full min-h-[4rem] rounded-xl bg-raised border border-line p-3 text-sm outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
+    </section>`;
+  }).join('');
+
+  return `
+    ${cards}
+    <button data-action="workout-save" class="press w-full h-16 rounded-2xl bg-plate text-ink font-bold text-xl">Guardar entreno</button>
+    <button data-action="workout-discard" class="press mt-3 w-full h-12 rounded-xl text-danger font-semibold">Descartar entreno</button>`;
+}
+
+/* =========================================================
+   Pantalla 3: Histórico de cargas
+   ========================================================= */
+function histListHtml() {
+  const all = buildHistory();
+  if (!all.length) {
+    return emptyBlock('Aún no hay entrenos guardados', 'Cuando guardes tu primer entreno verás aquí la evolución de cada ejercicio.');
+  }
+  const q = norm(ui.filter);
+  const items = all.filter(i => !q || i.key.includes(q));
+  if (!items.length) return `<p class="mt-8 text-center text-mute">Ningún ejercicio coincide con «${esc(ui.filter)}».</p>`;
+  return `<div class="mt-3 space-y-2">${items.map(i => `
+    <button data-action="hist-open" data-key="${esc(i.key)}" class="press w-full min-h-[4.5rem] rounded-2xl bg-surface border border-line px-4 py-3 flex items-center justify-between gap-3 text-left">
+      <span class="min-w-0">
+        <span class="block text-lg font-bold truncate">${esc(i.name)}</span>
+        <span class="block text-sm text-mute">${plural(i.sessions.length, 'sesión', 'sesiones')}, última el ${esc(fmtDate(i.last))}</span>
+      </span>
+      <span class="shrink-0 text-right">
+        <span class="block text-2xl font-extrabold num leading-none">${fmt(i.best)}</span>
+        <span class="block text-xs text-mute mt-1">${i.useKg ? 'kg máx.' : 'reps máx.'}</span>
+      </span>
+    </button>`).join('')}</div>`;
+}
+
+function viewHistory() {
+  const hasData = state.workouts.length > 0;
+  return `
+    ${hasData ? `<input id="histSearch" type="search" value="${esc(ui.filter)}" placeholder="Buscar ejercicio" autocomplete="off"
+      class="w-full h-14 rounded-xl bg-surface border border-line px-4 text-lg outline-none focus:border-plate">` : ''}
+    <div id="histList">${histListHtml()}</div>`;
+}
+
+function chart(pts) {
+  const W = 320, H = 150, L = 38, R = 12, T = 14, B = 26;
+  const vs = pts.map(p => p.v);
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  if (lo === hi) { lo = Math.max(0, lo - 5); hi = hi + 5; }
+  const iw = W - L - R, ih = H - T - B;
+  const X = i => L + i * iw / (pts.length - 1);
+  const Y = v => T + ih * (1 - (v - lo) / (hi - lo));
+  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)} ${Y(p.v).toFixed(1)}`).join(' ');
+  const dots = pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="4" fill="#f2c230"/>`).join('');
+  const sd = iso => new Date(iso).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+  const txt = 'fill="#9d9da6" font-size="11"';
+  return `<svg viewBox="0 0 ${W} ${H}" class="w-full h-auto" role="img" aria-label="Evolución por sesión">
+    <line x1="${L}" y1="${T}" x2="${W - R}" y2="${T}" stroke="#303035"/>
+    <line x1="${L}" y1="${T + ih}" x2="${W - R}" y2="${T + ih}" stroke="#303035"/>
+    <text x="${L - 6}" y="${T + 4}" text-anchor="end" ${txt}>${fmt(hi)}</text>
+    <text x="${L - 6}" y="${T + ih + 4}" text-anchor="end" ${txt}>${fmt(lo)}</text>
+    <text x="${L}" y="${H - 6}" ${txt}>${sd(pts[0].d)}</text>
+    <text x="${W - R}" y="${H - 6}" text-anchor="end" ${txt}>${sd(pts[pts.length - 1].d)}</text>
+    <path d="${path}" fill="none" stroke="#f2c230" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+    ${dots}
+  </svg>`;
+}
+
+function viewHistoryDetail(it) {
+  const unit = it.useKg ? 'kg' : 'reps';
+  const lastSession = it.sessions[it.sessions.length - 1];
+  const statBox = (label, value, u = '') => `
+    <div class="p-4">
+      <p class="text-sm text-mute">${label}</p>
+      <p class="mt-1 text-3xl font-extrabold num leading-none">${value}${u ? `<span class="text-base font-semibold text-mute ml-1">${u}</span>` : ''}</p>
+    </div>`;
+
+  const pts = it.sessions.slice(-20).map(s => ({ v: it.val(s), d: s.date }));
+  const chartBlock = pts.length >= 2 ? `
+    <div class="mt-4 rounded-2xl bg-surface border border-line p-4">
+      <p class="text-sm text-mute mb-2">${it.useKg ? 'Peso máximo' : 'Repeticiones máximas'} por sesión</p>
+      ${chart(pts)}
+    </div>` : '';
+
+  const sessions = [...it.sessions].reverse().map(s => `
+    <article class="rounded-2xl bg-surface border border-line p-4">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <h3 class="font-bold">${esc(fmtDate(s.date))}</h3>
+          <p class="text-sm text-mute truncate">${esc(s.routine)}</p>
+        </div>
+        <button data-action="hist-del" data-w="${esc(s.wid)}" data-key="${esc(it.key)}" aria-label="Borrar sesión del ${esc(fmtDate(s.date))}" class="press -mr-2 -mt-2 w-12 h-12 shrink-0 grid place-items-center rounded-full text-mute">${icon('trash', 'w-5 h-5')}</button>
+      </div>
+      <ul class="mt-1 space-y-1 num">
+        ${s.sets.map((t, k) => `<li class="flex items-baseline gap-3"><span class="w-5 text-mute">${k + 1}</span><span class="text-lg font-semibold">${esc(fmtSet(t))}</span></li>`).join('')}
+      </ul>
+    </article>`).join('');
+
+  return `
+    <div class="grid grid-cols-3 rounded-2xl bg-surface border border-line divide-x divide-line">
+      ${statBox('Mejor marca', fmt(it.best), unit)}
+      ${statBox('Última sesión', fmt(it.val(lastSession)), unit)}
+      ${statBox('Sesiones', it.sessions.length)}
+    </div>
+    ${chartBlock}
+    <h2 class="mt-6 mb-3 text-lg font-bold">Cargas registradas</h2>
+    <div class="space-y-3">${sessions}</div>`;
+}
+
+/* =========================================================
+   Pantalla 4: Temporizador de series
+   ========================================================= */
+const timerState = { running: false, elapsed: 0, phase: 'work', interval: null };
+
+function viewTimer() {
+  if (!state.draft) {
+    return emptyBlock('Primero comienza un entreno', 'En Entrenar elige una rutina para activar el temporizador.',
+      `<button data-action="tab" data-tab="train" class="press mt-6 h-14 px-6 rounded-xl bg-plate text-ink font-bold">Ir a Entrenar</button>`);
+  }
+
+  const d = state.draft;
+  const hasWork = Number(d.timerWork) > 0;
+  const hasRest = Number(d.timerRest) > 0;
+  const canRun = hasWork || hasRest;
+
+  if (timerState.running) {
+    const total = timerState.phase === 'work' ? Number(d.timerWork) : Number(d.timerRest);
+    const pct = Math.round(100 * timerState.elapsed / total);
+    const color = timerState.phase === 'work' ? '#f2c230' : '#9d9da6';
+    const remaining = Math.max(0, total - timerState.elapsed);
+    const mins = Math.floor(remaining / 60);
+    const secs = remaining % 60;
+
+    return `
+    <div class="mt-8 space-y-6">
+      <div class="text-center">
+        <p class="text-mute text-lg mb-4">${timerState.phase === 'work' ? 'TRABAJO' : 'DESCANSO'}</p>
+        <div class="relative w-64 h-64 mx-auto mb-6">
+          <svg viewBox="0 0 200 200" class="w-full h-full transform -rotate-90">
+            <circle cx="100" cy="100" r="90" fill="none" stroke="#303035" stroke-width="12"/>
+            <circle cx="100" cy="100" r="90" fill="none" stroke="${color}" stroke-width="12" stroke-dasharray="${pct * 5.65} 565" stroke-linecap="round" opacity="0.8"/>
+          </svg>
+          <div class="absolute inset-0 flex flex-col items-center justify-center">
+            <span class="text-6xl font-extrabold num" style="color: ${color}">${mins}:${String(secs).padStart(2, '0')}</span>
+          </div>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <button data-action="timer-pause" class="press h-16 rounded-2xl bg-surface font-bold text-lg">Pausar</button>
+        <button data-action="timer-skip" class="press h-16 rounded-2xl bg-raised font-bold text-lg">Siguiente</button>
+      </div>
+    </div>`;
+  }
+
+  return `
+    <div class="mt-4 space-y-4">
+      <div class="rounded-2xl bg-surface border border-line p-5">
+        <label class="block text-sm font-semibold text-mute mb-2">Tiempo de trabajo (segundos)</label>
+        <input id="timerWork" type="number" inputmode="numeric" min="5" max="300" step="5"
+          value="${Number(d.timerWork) || 60}" aria-label="Segundos de trabajo"
+          class="w-full h-14 rounded-xl bg-raised border border-line text-center text-3xl font-bold num outline-none focus:border-plate">
+      </div>
+
+      <div class="rounded-2xl bg-surface border border-line p-5">
+        <label class="block text-sm font-semibold text-mute mb-2">Tiempo de descanso (segundos)</label>
+        <input id="timerRest" type="number" inputmode="numeric" min="5" max="300" step="5"
+          value="${Number(d.timerRest) || 90}" aria-label="Segundos de descanso"
+          class="w-full h-14 rounded-xl bg-raised border border-line text-center text-3xl font-bold num outline-none focus:border-plate">
+      </div>
+
+      <button data-action="timer-start" ${canRun ? '' : 'disabled'} class="press w-full h-16 rounded-2xl ${canRun ? 'bg-plate text-ink font-bold text-xl' : 'bg-raised text-mute font-semibold'} disabled:opacity-50">Iniciar temporizador</button>
+
+      <div class="text-center text-sm text-mute pt-4">
+        <p>La alarma sonará automáticamente al terminar cada fase.</p>
+        <p class="mt-2 text-xs">Pantalla siempre activa mientras corre el temporizador.</p>
+      </div>
+    </div>`;
+}
+
+/* =========================================================
+   Pantalla 5: Ajustes / Copia de seguridad
+   ========================================================= */
+function viewSettings() {
+  const nR = state.routines.length, nW = state.workouts.length;
+  const le = state.meta.lastExport;
+  const rtf = new Intl.RelativeTimeFormat('es', { numeric: 'auto' });
+  const lastTxt = le ? `Última copia: ${rtf.format(-daysSince(le), 'day')}.` : 'Todavía no has exportado ninguna copia.';
+  const nudge = nW > 0 && (!le || daysSince(le) > 14);
+  return `
+    <section class="rounded-2xl bg-surface border border-line p-4">
+      <h2 class="text-xl font-bold">Copia de seguridad</h2>
+      <p class="mt-2 text-mute">Tus datos viven solo en este navegador. Exporta una copia para guardarla o para llevar tus rutinas y entrenos a otro móvil u otro navegador.</p>
+      <p class="mt-3 font-semibold">${plural(nR, 'rutina', 'rutinas')} y ${plural(nW, 'entreno', 'entrenos')}</p>
+      <p class="text-sm ${nudge ? 'text-plate' : 'text-mute'}">${lastTxt}${nudge ? ' Conviene exportar una.' : ''}</p>
+      <div class="mt-4 space-y-3">
+        <button data-action="export" class="press w-full h-16 rounded-2xl bg-plate text-ink font-bold text-xl flex items-center justify-center gap-2">${icon('download')} Exportar datos</button>
+        <button data-action="import-pick" class="press w-full h-16 rounded-2xl bg-raised font-bold text-xl flex items-center justify-center gap-2">${icon('upload')} Importar datos</button>
+        <input id="importFile" type="file" accept="application/json,.json" class="hidden">
+      </div>
+      <p class="mt-3 text-sm text-mute">Al importar, los datos del archivo reemplazan los actuales.</p>
+    </section>`;
+}
+
+function exportData() {
+  state.meta.lastExport = new Date().toISOString();
+  save();
+  const payload = {
+    app: 'gym-log', version: 1, exportedAt: state.meta.lastExport,
+    data: { routines: state.routines, workouts: state.workouts }
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `gym-log-${ymd(new Date())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast('Datos exportados');
+  render();
+}
+
+async function importFile(file) {
+  let incoming;
+  try {
+    incoming = normalize(JSON.parse(await file.text()));
+  } catch (e) {
+    toast('El archivo no es una copia válida de Gym Log', 'error');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: '¿Importar estos datos?',
+    text: `El archivo tiene ${plural(incoming.routines.length, 'rutina', 'rutinas')} y ${plural(incoming.workouts.length, 'entreno', 'entrenos')}. Reemplazarán ${plural(state.routines.length, 'rutina', 'rutinas')} y ${plural(state.workouts.length, 'entreno', 'entrenos')} que tienes ahora.`,
+    confirmLabel: 'Reemplazar datos',
+    danger: true
+  });
+  if (!ok) return;
+  state.routines = incoming.routines;
+  state.workouts = incoming.workouts;
+  ui.routineId = null; ui.exercise = null; ui.filter = '';
+  save();
+  render();
+  toast('Datos importados');
+}
+
+/* =========================================================
+   Render
+   ========================================================= */
+function renderHeader() {
+  let h;
+  if (ui.tab === 'routines') {
+    const r = currentRoutine();
+    h = r
+      ? header(r.name, { back: 'routine-back', right: `<button data-action="routine-rename" class="press w-12 h-12 shrink-0 grid place-items-center rounded-full text-mute" aria-label="Renombrar rutina">${icon('edit')}</button>` })
+      : header('Rutinas');
+  } else if (ui.tab === 'train') {
+    h = state.draft ? header(state.draft.routineName, { sub: fmtLong(state.draft.startedAt) }) : header('Entrenar');
+  } else if (ui.tab === 'history') {
+    const it = currentExercise();
+    h = it ? header(it.name, { back: 'hist-back' }) : header('Histórico');
+  } else {
+    h = header('Ajustes');
+  }
+  $('#header').innerHTML = h;
+}
+
+function viewHtml() {
+  switch (ui.tab) {
+    case 'routines': { const r = currentRoutine(); return r ? viewRoutineDetail(r) : viewRoutines(); }
+    case 'train': return viewTrain();
+    case 'timer': return viewTimer();
+    case 'history': { const it = currentExercise(); return it ? viewHistoryDetail(it) : viewHistory(); }
+    default: return viewSettings();
+  }
+}
+
+function render() {
+  renderHeader();
+  $('#view').innerHTML = viewHtml();
+  renderTabs();
+}
+const nav = () => { render(); window.scrollTo(0, 0); };
+
+/* =========================================================
+   Acciones
+   ========================================================= */
+const actions = {
+  tab: d => {
+    if (timerState.running && timerState.interval) { clearInterval(timerState.interval); timerState.running = false; }
+    ui.tab = d.tab; ui.routineId = null; ui.exercise = null; ui.filter = ''; nav();
+  },
+
+  // --- Rutinas
+  'routine-new': async () => {
+    const name = clean(await promptDialog({ title: 'Nueva rutina', placeholder: 'Ej. Pecho y hombro', confirmLabel: 'Crear rutina' }));
+    if (!name) return;
+    const r = { id: uid(), name, exercises: [] };
+    state.routines.push(r);
+    save();
+    ui.tab = 'routines'; ui.routineId = r.id;
+    nav();
+    toast('Rutina creada');
+    setTimeout(() => { const i = $('#exName'); if (i) i.focus(); }, 0);
+  },
+  'routine-open': d => { ui.routineId = d.id; nav(); },
+  'routine-back': () => { ui.routineId = null; nav(); },
+  'routine-rename': async () => {
+    const r = currentRoutine(); if (!r) return;
+    const name = clean(await promptDialog({ title: 'Renombrar rutina', value: r.name, confirmLabel: 'Guardar' }));
+    if (!name || name === r.name) return;
+    r.name = name; save(); render(); toast('Nombre guardado');
+  },
+  'routine-delete': async () => {
+    const r = currentRoutine(); if (!r) return;
+    const ok = await confirmDialog({
+      title: `¿Borrar «${r.name}»?`,
+      text: 'Se elimina la rutina y su lista de ejercicios. Los entrenos ya guardados se conservan en el histórico.',
+      confirmLabel: 'Borrar rutina', danger: true
+    });
+    if (!ok) return;
+    state.routines = state.routines.filter(x => x.id !== r.id);
+    save(); ui.routineId = null; nav(); toast('Rutina borrada');
+  },
+  'ex-rename': async d => {
+    const r = currentRoutine(); if (!r) return;
+    const x = r.exercises.find(e => e.id === d.id); if (!x) return;
+    const name = clean(await promptDialog({ title: 'Renombrar ejercicio', value: x.name, confirmLabel: 'Guardar' }));
+    if (!name || name === x.name) return;
+    if (r.exercises.some(e => e !== x && norm(e.name) === norm(name))) { toast('Ese ejercicio ya está en la rutina', 'error'); return; }
+    x.name = name; save(); render(); toast('Nombre guardado');
+  },
+  'ex-del': async d => {
+    const r = currentRoutine(); if (!r) return;
+    const x = r.exercises.find(e => e.id === d.id); if (!x) return;
+    const ok = await confirmDialog({
+      title: `¿Quitar «${x.name}»?`,
+      text: 'Se quita de la rutina. Lo que ya hayas registrado con este ejercicio se conserva en el histórico.',
+      confirmLabel: 'Quitar ejercicio', danger: true
+    });
+    if (!ok) return;
+    r.exercises = r.exercises.filter(e => e !== x); save(); render();
+  },
+
+  // --- Entrenamiento
+  'train-start': async d => {
+    const r = state.routines.find(x => x.id === d.id); if (!r) return;
+    if (!r.exercises.length) {
+      toast('Añade ejercicios a la rutina antes de entrenar', 'error');
+      ui.tab = 'routines'; ui.routineId = r.id; nav();
+      return;
+    }
+    if (state.draft) {
+      const ok = await confirmDialog({
+        title: 'Ya tienes un entreno en curso',
+        text: `Si empiezas «${r.name}» se descartará el entreno en curso de «${state.draft.routineName}».`,
+        confirmLabel: 'Empezar nuevo', danger: true
+      });
+      if (!ok) return;
+    }
+    state.draft = {
+      id: uid(), routineId: r.id, routineName: r.name, startedAt: new Date().toISOString(),
+      timerWork: 60, timerRest: 90,
+      entries: r.exercises.map(x => {
+        const last = lastSets(x.name);
+        const n = Math.min(Math.max(last ? last.sets.length : 1, 1), 8);
+        return { exerciseName: x.name, notes: '', completed: false, sets: Array.from({ length: n }, () => ({ reps: '', kg: '' })) };
+      })
+    };
+    save(); ui.tab = 'train'; ui.routineId = null; nav();
+  },
+  'set-add': d => {
+    const e = state.draft && state.draft.entries[+d.i]; if (!e) return;
+    const prev = e.sets[e.sets.length - 1];
+    e.sets.push(prev ? { reps: prev.reps, kg: prev.kg } : { reps: '', kg: '' });
+    save(); render();
+  },
+  'set-del': d => {
+    const e = state.draft && state.draft.entries[+d.i]; if (!e) return;
+    e.sets.splice(+d.j, 1); save(); render();
+  },
+  'ex-toggle': d => {
+    const e = state.draft && state.draft.entries[+d.i];
+    if (!e) return;
+    e.completed = !e.completed;
+    save(); render();
+  },
+  'workout-save': () => {
+    const d = state.draft; if (!d) return;
+    const entries = d.entries.map(e => ({
+      exerciseName: e.exerciseName,
+      sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
+    })).filter(e => e.sets.length);
+    if (!entries.length) { toast('Añade repeticiones en al menos una serie', 'error'); return; }
+    state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, entries });
+    state.draft = null;
+    save(); ui.tab = 'history'; ui.exercise = null; ui.filter = '';
+    nav(); toast('Entreno guardado');
+  },
+  'workout-discard': async () => {
+    const ok = await confirmDialog({
+      title: '¿Descartar el entreno?',
+      text: 'Se pierden las series que has anotado en este entreno.',
+      confirmLabel: 'Descartar entreno', danger: true
+    });
+    if (!ok) return;
+    state.draft = null; save(); nav();
+  },
+
+  // --- Histórico
+  'hist-open': d => { ui.exercise = d.key; nav(); },
+  'hist-back': () => { ui.exercise = null; nav(); },
+  'hist-del': async d => {
+    const ok = await confirmDialog({
+      title: '¿Borrar esta sesión?',
+      text: 'Se elimina este ejercicio de ese día. No se puede deshacer.',
+      confirmLabel: 'Borrar sesión', danger: true
+    });
+    if (!ok) return;
+    const w = state.workouts.find(x => x.id === d.w); if (!w) return;
+    w.entries = w.entries.filter(e => norm(e.exerciseName) !== d.key);
+    if (!w.entries.length) state.workouts = state.workouts.filter(x => x !== w);
+    save();
+    currentExercise();
+    render(); toast('Sesión borrada');
+  },
+
+  // --- Temporizador
+  'timer-start': () => {
+    const work = Math.max(5, parseInt($('#timerWork').value) || 60);
+    const rest = Math.max(5, parseInt($('#timerRest').value) || 90);
+    if (state.draft) {
+      state.draft.timerWork = work;
+      state.draft.timerRest = rest;
+      save();
+    }
+    timerState.running = true;
+    timerState.elapsed = 0;
+    timerState.phase = 'work';
+    runTimer(work);
+    render();
+    document.documentElement.requestFullscreen().catch(() => {});
+  },
+  'timer-pause': () => {
+    if (timerState.interval) clearInterval(timerState.interval);
+    timerState.running = false;
+    render();
+  },
+  'timer-skip': () => {
+    if (timerState.interval) clearInterval(timerState.interval);
+    const d = state.draft;
+    if (!d) return;
+    const nextPhase = timerState.phase === 'work' ? 'rest' : 'work';
+    const nextDuration = nextPhase === 'work' ? Number(d.timerWork) : Number(d.timerRest);
+    if (nextDuration <= 0) { timerState.running = false; render(); return; }
+    timerState.phase = nextPhase === 'work' ? 'work' : 'rest';
+    timerState.elapsed = 0;
+    playSound(); vibrate(200);
+    runTimer(nextDuration);
+    render();
+  },
+
+  // --- Ajustes
+  export: exportData,
+  'import-pick': () => { const f = $('#importFile'); if (f) f.click(); }
+};
+
+const forms = {
+  'ex-add': f => {
+    const r = currentRoutine(); if (!r) return;
+    const name = clean(f.elements.namedItem('exname').value);
+    if (!name) return;
+    if (r.exercises.some(x => norm(x.name) === norm(name))) { toast('Ese ejercicio ya está en la rutina', 'error'); return; }
+    r.exercises.push({ id: uid(), name });
+    save(); render();
+    const i = $('#exName'); if (i) i.focus();
+  }
+};
+
+/* =========================================================
+   Temporizador: sonido y vibración
+   ========================================================= */
+function vibrate(ms = 200) {
+  try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {}
+}
+
+function playSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 800;
+    gain.gain.setValueAtTime(0.3, t);
+    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+    osc.start(t);
+    osc.stop(t + 0.3);
+  } catch (e) {}
+}
+
+function runTimer(duration) {
+  let elapsed = 0;
+  timerState.interval = setInterval(() => {
+    elapsed++;
+    timerState.elapsed = elapsed;
+    render();
+    if (elapsed >= duration) {
+      clearInterval(timerState.interval);
+      playSound();
+      vibrate(300);
+      const d = state.draft;
+      if (!d) { timerState.running = false; render(); return; }
+      const nextPhase = timerState.phase === 'work' ? 'rest' : 'work';
+      const nextDuration = nextPhase === 'work' ? Number(d.timerWork) : Number(d.timerRest);
+      if (nextDuration <= 0) { timerState.running = false; render(); return; }
+      timerState.phase = nextPhase;
+      timerState.elapsed = 0;
+      runTimer(nextDuration);
+    }
+  }, 1000);
+}
+
+/* =========================================================
+   Eventos globales
+   ========================================================= */
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const fn = actions[el.dataset.action];
+  if (fn) fn(el.dataset, el);
+});
+
+document.addEventListener('submit', e => {
+  const f = e.target.closest('form[data-form]');
+  if (!f) return;
+  e.preventDefault();
+  const fn = forms[f.dataset.form];
+  if (fn) fn(f);
+});
+
+document.addEventListener('input', e => {
+  const el = e.target;
+  if (el.matches('[data-field]') && state.draft) {
+    if (el.dataset.field === 'notes') {
+      const entry = state.draft.entries[+el.dataset.i];
+      if (!entry) return;
+      entry.notes = el.value.slice(0, 500);
+      save();
+    } else {
+      const s = state.draft.entries[+el.dataset.i]?.sets[+el.dataset.j];
+      if (!s) return;
+      let v = el.value;
+      v = el.dataset.field === 'reps' ? v.replace(/\D/g, '') : v.replace(/[^\d.,]/g, '');
+      if (v !== el.value) el.value = v;
+      s[el.dataset.field] = v;
+      save();
+    }
+  } else if (el.id === 'timerWork' || el.id === 'timerRest') {
+    if (state.draft) {
+      const key = el.id === 'timerWork' ? 'timerWork' : 'timerRest';
+      state.draft[key] = Math.max(5, Math.round(parseNum(el.value)));
+      save();
+    }
+  } else if (el.id === 'histSearch') {
+    ui.filter = el.value;
+    $('#histList').innerHTML = histListHtml();
+  }
+});
+
+document.addEventListener('change', e => {
+  if (e.target.id === 'importFile') {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (f) importFile(f);
+  }
+});
+
+/* =========================================================
+   Arranque
+   ========================================================= */
+render();
+})();
+</script>
+</body>
+</html>
