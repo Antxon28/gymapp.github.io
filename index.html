@@ -204,43 +204,23 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 /* =========================================================
    Estado de la interfaz (no se guarda)
    ========================================================= */
-const ui = { tab: 'routines', routineId: null, exercise: null, filter: '' };
+const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set() };
 const currentRoutine = () => {
   const r = state.routines.find(x => x.id === ui.routineId);
   if (!r) ui.routineId = null;
   return r || null;
 };
-const currentExercise = () => {
-  if (!ui.exercise) return null;
-  const it = buildHistory().find(i => i.key === ui.exercise);
-  if (!it) ui.exercise = null;
-  return it || null;
+const currentWorkout = () => {
+  const w = state.workouts.find(x => x.id === ui.workoutId);
+  if (!w) ui.workoutId = null;
+  return w || null;
 };
 
 /* =========================================================
    Histórico (se agrupa por nombre de ejercicio)
    ========================================================= */
-function buildHistory() {
-  const map = new Map();
-  const ws = [...state.workouts].sort((a, b) => new Date(a.date) - new Date(b.date));
-  for (const w of ws) {
-    for (const e of w.entries) {
-      const k = norm(e.exerciseName);
-      if (!map.has(k)) map.set(k, { key: k, name: e.exerciseName, sessions: [] });
-      const it = map.get(k);
-      it.name = e.exerciseName;
-      it.sessions.push({
-        wid: w.id, date: w.date, routine: w.routineName, sets: e.sets,
-        maxKg: Math.max(...e.sets.map(s => s.kg)),
-        maxReps: Math.max(...e.sets.map(s => s.reps))
-      });
-    }
-  }
-  return [...map.values()].map(it => {
-    const useKg = it.sessions.some(s => s.maxKg > 0);
-    const val = s => useKg ? s.maxKg : s.maxReps;
-    return { ...it, useKg, val, best: Math.max(...it.sessions.map(val)), last: it.sessions[it.sessions.length - 1].date };
-  }).sort((a, b) => new Date(b.last) - new Date(a.last));
+function getSortedWorkouts() {
+  return [...state.workouts].sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 function lastSets(name) {
@@ -409,6 +389,9 @@ function viewTrain() {
     const hint = last
       ? `Última vez: ${last.sets.map(fmtSet).join(', ')}`
       : 'Primera vez con este ejercicio';
+    const exId = d.id + '-ex-' + i;
+    const isExpanded = ui.expandedExercises.has(exId);
+
     const rows = e.sets.map((s, j) => {
       const p = last ? (last.sets[j] || last.sets[last.sets.length - 1]) : null;
       return `
@@ -416,29 +399,35 @@ function viewTrain() {
         <div class="h-14 grid place-items-center">
           <span class="w-10 h-10 rounded-full border-2 border-plate/70 grid place-items-center font-bold num">${j + 1}</span>
         </div>
-        <input data-field="reps" data-i="${i}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
-          value="${esc(s.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Repeticiones de la serie ${j + 1}"
-          class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
         <input data-field="kg" data-i="${i}" data-j="${j}" inputmode="decimal" autocomplete="off"
           value="${esc(s.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos de la serie ${j + 1}"
+          class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
+        <input data-field="reps" data-i="${i}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
+          value="${esc(s.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Repeticiones de la serie ${j + 1}"
           class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
         <button data-action="set-del" data-i="${i}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press h-14 grid place-items-center text-mute">${icon('x', 'w-5 h-5')}</button>
       </div>`;
     }).join('');
 
     return `
-    <section class="rounded-2xl bg-surface border-2 p-4 mb-4 transition-colors ${e.completed ? 'border-plate bg-surface/80' : 'border-line'}">
-      <div class="flex items-start justify-between gap-2 mb-2">
-        <h2 class="text-xl font-bold flex-1">${esc(e.exerciseName)}</h2>
-        <button data-action="ex-toggle" data-i="${i}" aria-label="${e.completed ? 'Marcar como pendiente' : 'Marcar como completado'}" class="press -mt-1 -mr-1 text-${e.completed ? 'plate' : 'mute'}">${icon('check', 'w-6 h-6')}</button>
-      </div>
-      <p class="text-sm text-mute">${esc(hint)}</p>
-      ${e.sets.length ? `<div class="mt-3 grid grid-cols-[3rem_1fr_1fr_3rem] gap-2 text-sm text-mute"><span class="text-center">Serie</span><span class="text-center">Reps</span><span class="text-center">Kilos</span><span></span></div>` : ''}
-      ${rows}
-      <button data-action="set-add" data-i="${i}" class="press mt-3 w-full h-14 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2">${icon('plus', 'w-5 h-5')} Añadir serie</button>
-      <textarea data-field="notes" data-i="${i}" placeholder="Notas sobre este ejercicio (respiración, forma, cómo te has sentido...)" maxlength="500"
-        class="mt-3 w-full min-h-[4rem] rounded-xl bg-raised border border-line p-3 text-sm outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
-    </section>`;
+    <article class="rounded-2xl bg-surface border-2 overflow-hidden ${e.completed ? 'border-plate bg-surface/80' : 'border-line'}">
+      <button data-action="ex-expand" data-i="${i}" class="press w-full text-left p-4 flex items-start justify-between gap-2 hover:bg-raised/20 transition-colors">
+        <div class="min-w-0 flex-1">
+          <h2 class="text-xl font-bold">${esc(e.exerciseName)}</h2>
+          <p class="text-sm text-mute mt-0.5">${esc(hint)}</p>
+        </div>
+        <span class="shrink-0 text-plate transform transition-transform ${isExpanded ? 'rotate-180' : ''}">${icon('chevron', 'w-5 h-5')}</span>
+      </button>
+      ${isExpanded ? `
+      <div class="bg-raised/20 border-t border-line p-4 space-y-3">
+        ${e.sets.length ? `<div class="grid grid-cols-[3rem_1fr_1fr_3rem] gap-2 text-sm text-mute"><span class="text-center">Serie</span><span class="text-center">Kilos</span><span class="text-center">Reps</span><span></span></div>` : ''}
+        ${rows}
+        <button data-action="set-add" data-i="${i}" class="press mt-3 w-full h-14 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2">${icon('plus', 'w-5 h-5')} Añadir serie</button>
+        <textarea data-field="notes" data-i="${i}" placeholder="Notas sobre este ejercicio..." maxlength="500"
+          class="w-full min-h-[4rem] rounded-xl bg-raised border border-line p-3 text-sm outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
+        <button data-action="ex-toggle" data-i="${i}" class="press w-full h-14 rounded-xl ${e.completed ? 'bg-plate text-ink' : 'bg-raised'} font-bold flex items-center justify-center gap-2">${icon('check', 'w-5 h-5')} ${e.completed ? 'Marcar como pendiente' : 'Completar ejercicio'}</button>
+      </div>` : ''}
+    </article>`;
   }).join('');
 
   return `
@@ -450,33 +439,51 @@ function viewTrain() {
 /* =========================================================
    Pantalla 3: Histórico de cargas
    ========================================================= */
-function histListHtml() {
-  const all = buildHistory();
-  if (!all.length) {
-    return emptyBlock('Aún no hay entrenos guardados', 'Cuando guardes tu primer entreno verás aquí la evolución de cada ejercicio.');
-  }
-  const q = norm(ui.filter);
-  const items = all.filter(i => !q || i.key.includes(q));
-  if (!items.length) return `<p class="mt-8 text-center text-mute">Ningún ejercicio coincide con «${esc(ui.filter)}».</p>`;
-  return `<div class="mt-3 space-y-2">${items.map(i => `
-    <button data-action="hist-open" data-key="${esc(i.key)}" class="press w-full min-h-[4.5rem] rounded-2xl bg-surface border border-line px-4 py-3 flex items-center justify-between gap-3 text-left">
-      <span class="min-w-0">
-        <span class="block text-lg font-bold truncate">${esc(i.name)}</span>
-        <span class="block text-sm text-mute">${plural(i.sessions.length, 'sesión', 'sesiones')}, última el ${esc(fmtDate(i.last))}</span>
-      </span>
-      <span class="shrink-0 text-right">
-        <span class="block text-2xl font-extrabold num leading-none">${fmt(i.best)}</span>
-        <span class="block text-xs text-mute mt-1">${i.useKg ? 'kg máx.' : 'reps máx.'}</span>
-      </span>
-    </button>`).join('')}</div>`;
-}
-
 function viewHistory() {
-  const hasData = state.workouts.length > 0;
+  const ws = getSortedWorkouts();
+  if (!ws.length) {
+    return emptyBlock('Aún no hay entrenamientos guardados', 'Cuando guardes tu primer entreno verás aquí el histórico completo.');
+  }
+
+  const q = norm(ui.filter);
+  const filtered = ws.filter(w => !q || norm(w.routineName).includes(q));
+  if (!filtered.length) return `<p class="mt-8 text-center text-mute">Ningún entreno coincide con «${esc(ui.filter)}».</p>`;
+
+  const hasKg = ws.some(w => w.entries.some(e => e.sets.some(s => s.kg > 0)));
+  
   return `
-    ${hasData ? `<input id="histSearch" type="search" value="${esc(ui.filter)}" placeholder="Buscar ejercicio" autocomplete="off"
-      class="w-full h-14 rounded-xl bg-surface border border-line px-4 text-lg outline-none focus:border-plate">` : ''}
-    <div id="histList">${histListHtml()}</div>`;
+    <input id="histSearch" type="search" value="${esc(ui.filter)}" placeholder="Buscar rutina" autocomplete="off"
+      class="w-full h-14 rounded-xl bg-surface border border-line px-4 text-lg outline-none focus:border-plate mb-4">
+    <div class="space-y-2">
+      ${filtered.map(w => {
+        const isExpanded = ui.expandedSessions.has(w.id);
+        const totalExercises = w.entries.length;
+        const totalSets = w.entries.reduce((sum, e) => sum + e.sets.length, 0);
+        return `
+        <article class="rounded-2xl bg-surface border border-line overflow-hidden">
+          <button data-action="workout-open" data-id="${esc(w.id)}" class="press w-full text-left p-4 flex items-start justify-between gap-2 hover:bg-raised/30 transition-colors">
+            <div class="min-w-0 flex-1">
+              <h3 class="font-bold">${esc(w.routineName)}</h3>
+              <p class="text-sm text-mute">${esc(fmtDate(w.date))}</p>
+              <p class="text-xs text-mute mt-0.5">${plural(totalExercises, 'ejercicio', 'ejercicios')} • ${totalSets} series</p>
+            </div>
+            <span class="shrink-0 text-plate transform transition-transform ${isExpanded ? 'rotate-180' : ''}">${icon('chevron', 'w-5 h-5')}</span>
+          </button>
+          ${isExpanded ? `
+          <div class="bg-raised/20 border-t border-line p-4 space-y-4">
+            ${w.entries.map((e, idx) => `
+            <div class="rounded-xl bg-surface/50 border border-line/50 p-3">
+              <h4 class="font-semibold text-sm mb-2">${esc(e.exerciseName)}</h4>
+              <ul class="space-y-1 text-xs num">
+                ${e.sets.map((s, j) => `<li class="flex gap-2 text-mute"><span class="min-w-[2rem]">S${j + 1}:</span><span class="text-chalk font-semibold">${fmt(s.kg)} kg</span><span class="text-chalk font-semibold">${s.reps} reps</span></li>`).join('')}
+              </ul>
+              ${e.notes ? `<div class="mt-2 pt-2 border-t border-line/30"><p class="text-xs text-chalk/70 whitespace-pre-wrap break-words">${esc(e.notes)}</p></div>` : ''}
+            </div>`).join('')}
+            <button data-action="workout-delete" data-id="${esc(w.id)}" class="press mt-2 w-full h-10 rounded-lg border border-danger/50 text-danger font-semibold text-sm">Borrar entreno</button>
+          </div>` : ''}
+        </article>`;
+      }).join('')}
+    </div>`;
 }
 
 function chart(pts) {
@@ -501,47 +508,6 @@ function chart(pts) {
     <path d="${path}" fill="none" stroke="#f2c230" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
     ${dots}
   </svg>`;
-}
-
-function viewHistoryDetail(it) {
-  const unit = it.useKg ? 'kg' : 'reps';
-  const lastSession = it.sessions[it.sessions.length - 1];
-  const statBox = (label, value, u = '') => `
-    <div class="p-4">
-      <p class="text-sm text-mute">${label}</p>
-      <p class="mt-1 text-3xl font-extrabold num leading-none">${value}${u ? `<span class="text-base font-semibold text-mute ml-1">${u}</span>` : ''}</p>
-    </div>`;
-
-  const pts = it.sessions.slice(-20).map(s => ({ v: it.val(s), d: s.date }));
-  const chartBlock = pts.length >= 2 ? `
-    <div class="mt-4 rounded-2xl bg-surface border border-line p-4">
-      <p class="text-sm text-mute mb-2">${it.useKg ? 'Peso máximo' : 'Repeticiones máximas'} por sesión</p>
-      ${chart(pts)}
-    </div>` : '';
-
-  const sessions = [...it.sessions].reverse().map(s => `
-    <article class="rounded-2xl bg-surface border border-line p-4">
-      <div class="flex items-start justify-between gap-2">
-        <div class="min-w-0">
-          <h3 class="font-bold">${esc(fmtDate(s.date))}</h3>
-          <p class="text-sm text-mute truncate">${esc(s.routine)}</p>
-        </div>
-        <button data-action="hist-del" data-w="${esc(s.wid)}" data-key="${esc(it.key)}" aria-label="Borrar sesión del ${esc(fmtDate(s.date))}" class="press -mr-2 -mt-2 w-12 h-12 shrink-0 grid place-items-center rounded-full text-mute">${icon('trash', 'w-5 h-5')}</button>
-      </div>
-      <ul class="mt-1 space-y-1 num">
-        ${s.sets.map((t, k) => `<li class="flex items-baseline gap-3"><span class="w-5 text-mute">${k + 1}</span><span class="text-lg font-semibold">${esc(fmtSet(t))}</span></li>`).join('')}
-      </ul>
-    </article>`).join('');
-
-  return `
-    <div class="grid grid-cols-3 rounded-2xl bg-surface border border-line divide-x divide-line">
-      ${statBox('Mejor marca', fmt(it.best), unit)}
-      ${statBox('Última sesión', fmt(it.val(lastSession)), unit)}
-      ${statBox('Sesiones', it.sessions.length)}
-    </div>
-    ${chartBlock}
-    <h2 class="mt-6 mb-3 text-lg font-bold">Cargas registradas</h2>
-    <div class="space-y-3">${sessions}</div>`;
 }
 
 /* =========================================================
@@ -643,9 +609,11 @@ function exportData() {
   save();
   const payload = {
     app: 'gym-log', version: 1, exportedAt: state.meta.lastExport,
+    encoding: 'utf-8',
     data: { routines: state.routines, workouts: state.workouts }
   };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const jsonStr = JSON.stringify(payload, null, 2);
+  const blob = new Blob([new TextEncoder().encode(jsonStr)], { type: 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -661,9 +629,11 @@ function exportData() {
 async function importFile(file) {
   let incoming;
   try {
-    incoming = normalize(JSON.parse(await file.text()));
+    const text = await file.text();
+    incoming = normalize(JSON.parse(text));
   } catch (e) {
     toast('El archivo no es una copia válida de Gym Log', 'error');
+    console.error('Import error:', e);
     return;
   }
   const ok = await confirmDialog({
@@ -675,7 +645,7 @@ async function importFile(file) {
   if (!ok) return;
   state.routines = incoming.routines;
   state.workouts = incoming.workouts;
-  ui.routineId = null; ui.exercise = null; ui.filter = '';
+  ui.routineId = null; ui.workoutId = null; ui.filter = '';
   save();
   render();
   toast('Datos importados');
@@ -686,16 +656,19 @@ async function importFile(file) {
    ========================================================= */
 function renderHeader() {
   let h;
+  const timerBtn = timerState.running ? `<button data-action="timer-stop-all" class="press px-4 h-10 rounded-full bg-danger text-ink font-bold text-sm flex items-center gap-1" aria-label="Parar temporizador">${icon('x', 'w-4 h-4')} Parar</button>` : '';
+  
   if (ui.tab === 'routines') {
     const r = currentRoutine();
     h = r
       ? header(r.name, { back: 'routine-back', right: `<button data-action="routine-rename" class="press w-12 h-12 shrink-0 grid place-items-center rounded-full text-mute" aria-label="Renombrar rutina">${icon('edit')}</button>` })
       : header('Rutinas');
   } else if (ui.tab === 'train') {
-    h = state.draft ? header(state.draft.routineName, { sub: fmtLong(state.draft.startedAt) }) : header('Entrenar');
+    h = state.draft ? header(state.draft.routineName, { sub: fmtLong(state.draft.startedAt), right: timerBtn }) : header('Entrenar');
+  } else if (ui.tab === 'timer') {
+    h = header('Temporizador', { right: timerBtn });
   } else if (ui.tab === 'history') {
-    const it = currentExercise();
-    h = it ? header(it.name, { back: 'hist-back' }) : header('Histórico');
+    h = header('Histórico');
   } else {
     h = header('Ajustes');
   }
@@ -707,7 +680,7 @@ function viewHtml() {
     case 'routines': { const r = currentRoutine(); return r ? viewRoutineDetail(r) : viewRoutines(); }
     case 'train': return viewTrain();
     case 'timer': return viewTimer();
-    case 'history': { const it = currentExercise(); return it ? viewHistoryDetail(it) : viewHistory(); }
+    case 'history': return viewHistory();
     default: return viewSettings();
   }
 }
@@ -724,8 +697,9 @@ const nav = () => { render(); window.scrollTo(0, 0); };
    ========================================================= */
 const actions = {
   tab: d => {
-    if (timerState.running && timerState.interval) { clearInterval(timerState.interval); timerState.running = false; }
-    ui.tab = d.tab; ui.routineId = null; ui.exercise = null; ui.filter = ''; nav();
+    ui.tab = d.tab; ui.routineId = null; ui.workoutId = null; ui.filter = ''; 
+    if (d.tab !== 'train') ui.expandedExercises.clear();
+    nav();
   },
 
   // --- Rutinas
@@ -820,18 +794,34 @@ const actions = {
     const e = state.draft && state.draft.entries[+d.i];
     if (!e) return;
     e.completed = !e.completed;
+    const exId = state.draft.id + '-ex-' + d.i;
+    if (e.completed) {
+      ui.expandedExercises.delete(exId);
+    } else {
+      ui.expandedExercises.add(exId);
+    }
     save(); render();
+  },
+  'ex-expand': d => {
+    const exId = state.draft.id + '-ex-' + d.i;
+    if (ui.expandedExercises.has(exId)) {
+      ui.expandedExercises.delete(exId);
+    } else {
+      ui.expandedExercises.add(exId);
+    }
+    render();
   },
   'workout-save': () => {
     const d = state.draft; if (!d) return;
     const entries = d.entries.map(e => ({
       exerciseName: e.exerciseName,
+      notes: e.notes || '',
       sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
     })).filter(e => e.sets.length);
     if (!entries.length) { toast('Añade repeticiones en al menos una serie', 'error'); return; }
     state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, entries });
     state.draft = null;
-    save(); ui.tab = 'history'; ui.exercise = null; ui.filter = '';
+    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear();
     nav(); toast('Entreno guardado');
   },
   'workout-discard': async () => {
@@ -845,21 +835,25 @@ const actions = {
   },
 
   // --- Histórico
-  'hist-open': d => { ui.exercise = d.key; nav(); },
-  'hist-back': () => { ui.exercise = null; nav(); },
-  'hist-del': async d => {
+  'workout-open': d => {
+    if (ui.expandedSessions.has(d.id)) {
+      ui.expandedSessions.delete(d.id);
+    } else {
+      ui.expandedSessions.add(d.id);
+    }
+    render();
+  },
+  'workout-delete': async d => {
+    const w = state.workouts.find(x => x.id === d.id);
+    if (!w) return;
     const ok = await confirmDialog({
-      title: '¿Borrar esta sesión?',
-      text: 'Se elimina este ejercicio de ese día. No se puede deshacer.',
-      confirmLabel: 'Borrar sesión', danger: true
+      title: `¿Borrar el entreno de ${fmtDate(w.date)}?`,
+      text: `Se elimina completamente el entreno «${w.routineName}» con todos sus ejercicios y notas.`,
+      confirmLabel: 'Borrar entreno', danger: true
     });
     if (!ok) return;
-    const w = state.workouts.find(x => x.id === d.w); if (!w) return;
-    w.entries = w.entries.filter(e => norm(e.exerciseName) !== d.key);
-    if (!w.entries.length) state.workouts = state.workouts.filter(x => x !== w);
-    save();
-    currentExercise();
-    render(); toast('Sesión borrada');
+    state.workouts = state.workouts.filter(x => x.id !== d.id);
+    save(); render(); toast('Entreno borrado');
   },
 
   // --- Temporizador
@@ -894,6 +888,12 @@ const actions = {
     timerState.elapsed = 0;
     playSound(); vibrate(200);
     runTimer(nextDuration);
+    render();
+  },
+  'timer-stop-all': () => {
+    if (timerState.interval) clearInterval(timerState.interval);
+    timerState.running = false;
+    timerState.elapsed = 0;
     render();
   },
 
@@ -1002,7 +1002,7 @@ document.addEventListener('input', e => {
     }
   } else if (el.id === 'histSearch') {
     ui.filter = el.value;
-    $('#histList').innerHTML = histListHtml();
+    render();
   }
 });
 
