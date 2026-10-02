@@ -48,6 +48,8 @@
   .num { font-variant-numeric: tabular-nums; }
   :focus-visible { outline: 2px solid #f2c230; outline-offset: 2px; }
   input:focus-visible { outline: none; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+  .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   input::placeholder { color: #5d5d64; }
   .press { transition: transform .08s ease; }
   .press:active { transform: scale(.97); }
@@ -63,7 +65,7 @@
 </div>
 
 <nav class="fixed bottom-0 inset-x-0 z-30 bg-ink border-t border-line" style="padding-bottom: var(--safe-bottom)" aria-label="Navegación principal">
-  <div id="tabs" class="mx-auto max-w-xl grid grid-cols-5"></div>
+  <div id="tabs" class="mx-auto max-w-xl grid grid-cols-4"></div>
 </nav>
 
 <div id="modal-root"></div>
@@ -117,7 +119,9 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
   download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
   upload: '<path d="M12 16V5M7 9l5-5 5 5M5 20h14"/>',
-  check: '<path d="M20 6L9 17l-5-5"/>'
+  check: '<path d="M20 6L9 17l-5-5"/>',
+  more: '<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
 };
 const icon = (name, cls = 'w-6 h-6') =>
   `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -151,12 +155,15 @@ function normalize(src) {
   return { routines, workouts };
 }
 
+const clampSec = v => Math.min(1800, Math.max(5, Math.round(Number(v)) || 90));
 function sanitizeDraft(d) {
   if (!d || !Array.isArray(d.entries)) return null;
   const entries = d.entries.map(e => ({
     exerciseName: clean(e.exerciseName),
+    gif: String(e.gif ?? '').slice(0, 500),
     notes: String(e.notes ?? '').slice(0, 500).trim(),
     completed: Boolean(e.completed),
+    timerSec: clampSec(e.timerSec),
     sets: (Array.isArray(e.sets) ? e.sets : []).map(s => ({ reps: String(s.reps ?? ''), kg: String(s.kg ?? '') }))
   })).filter(e => e.exerciseName);
   if (!entries.length) return null;
@@ -165,8 +172,6 @@ function sanitizeDraft(d) {
     routineId: d.routineId ? String(d.routineId) : null,
     routineName: clean(d.routineName) || 'Entreno',
     startedAt: validDate(d.startedAt),
-    timerWork: Number(d.timerWork) || 60,
-    timerRest: Number(d.timerRest) || 90,
     entries
   };
 }
@@ -204,7 +209,7 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 /* =========================================================
    Estado de la interfaz (no se guarda)
    ========================================================= */
-const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set() };
+const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set(), trainMode: 'carousel', selectedExerciseIdx: null, panels: { notes: false, timer: false } };
 const currentRoutine = () => {
   const r = state.routines.find(x => x.id === ui.routineId);
   if (!r) ui.routineId = null;
@@ -304,13 +309,13 @@ const emptyBlock = (title, text, extra = '') => `
     ${extra}
   </div>`;
 
-const TABS = [['routines', 'Rutinas', 'list'], ['train', 'Entrenar', 'dumbbell'], ['timer', 'Temporizador', 'clock'], ['history', 'Histórico', 'chart'], ['settings', 'Ajustes', 'sliders']];
+const TABS = [['routines', 'Rutinas', 'list'], ['train', 'Entrenar', 'dumbbell'], ['history', 'Histórico', 'chart'], ['settings', 'Ajustes', 'sliders']];
 function renderTabs() {
   $('#tabs').innerHTML = TABS.map(([id, label, ic]) => `
     <button data-action="tab" data-tab="${id}" ${ui.tab === id ? 'aria-current="page"' : ''}
       class="press relative h-16 flex flex-col items-center justify-center gap-1 text-xs font-semibold ${ui.tab === id ? 'text-plate' : 'text-mute'}">
       ${icon(ic)}<span>${label}</span>
-      ${(id === 'train' || id === 'timer') && state.draft ? '<span class="absolute top-2 right-[calc(50%-22px)] w-2.5 h-2.5 rounded-full bg-plate"></span>' : ''}
+      ${id === 'train' && state.draft ? '<span class="absolute top-2 right-[calc(50%-22px)] w-2.5 h-2.5 rounded-full bg-plate"></span>' : ''}
     </button>`).join('');
 }
 
@@ -343,6 +348,7 @@ function viewRoutineDetail(r) {
   const rows = r.exercises.map(x => `
     <li class="flex items-center gap-1 rounded-xl bg-surface border border-line pl-4 pr-1 min-h-[3.5rem]">
       <span class="flex-1 min-w-0 text-lg font-semibold truncate">${esc(x.name)}</span>
+      <button data-action="ex-gif" data-id="${esc(x.id)}" aria-label="Editar GIF de ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-plate" title="GIF/video">${icon('edit', 'w-5 h-5')}</button>
       <button data-action="ex-rename" data-id="${esc(x.id)}" aria-label="Renombrar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-mute">${icon('edit', 'w-5 h-5')}</button>
       <button data-action="ex-del" data-id="${esc(x.id)}" aria-label="Quitar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-danger">${icon('trash', 'w-5 h-5')}</button>
     </li>`).join('');
@@ -384,56 +390,113 @@ function viewTrain() {
       </div>`;
   }
 
-  const cards = d.entries.map((e, i) => {
-    const last = lastSets(e.exerciseName);
-    const hint = last
-      ? `Última vez: ${last.sets.map(fmtSet).join(', ')}`
-      : 'Primera vez con este ejercicio';
-    const exId = d.id + '-ex-' + i;
-    const isExpanded = ui.expandedExercises.has(exId);
+  // Mostrar todos los ejercicios en carrusel horizontal
+  if (ui.trainMode === 'carousel') {
+    if (!d.entries.length) {
+      return emptyBlock('Sin ejercicios', 'La rutina no tiene ejercicios.');
+    }
 
-    const rows = e.sets.map((s, j) => {
-      const p = last ? (last.sets[j] || last.sets[last.sets.length - 1]) : null;
-      return `
-      <div class="grid grid-cols-[3rem_1fr_1fr_3rem] gap-2 mt-2 items-center">
-        <div class="h-14 grid place-items-center">
-          <span class="w-10 h-10 rounded-full border-2 border-plate/70 grid place-items-center font-bold num">${j + 1}</span>
-        </div>
-        <input data-field="kg" data-i="${i}" data-j="${j}" inputmode="decimal" autocomplete="off"
-          value="${esc(s.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos de la serie ${j + 1}"
-          class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
-        <input data-field="reps" data-i="${i}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
-          value="${esc(s.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Repeticiones de la serie ${j + 1}"
-          class="h-14 w-full min-w-0 rounded-xl bg-raised border border-line text-center text-2xl font-bold num outline-none focus:border-plate">
-        <button data-action="set-del" data-i="${i}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press h-14 grid place-items-center text-mute">${icon('x', 'w-5 h-5')}</button>
-      </div>`;
-    }).join('');
+    const carouselId = 'exercise-carousel-' + d.id;
 
     return `
-    <article class="rounded-2xl bg-surface border-2 overflow-hidden ${e.completed ? 'border-plate bg-surface/80' : 'border-line'}">
-      <button data-action="ex-expand" data-i="${i}" class="press w-full text-left p-4 flex items-start justify-between gap-2 hover:bg-raised/20 transition-colors">
-        <div class="min-w-0 flex-1">
-          <h2 class="text-xl font-bold">${esc(e.exerciseName)}</h2>
-          <p class="text-sm text-mute mt-0.5">${esc(hint)}</p>
+      <div class="mb-4">
+        <div id="${carouselId}" class="flex overflow-x-auto snap-x snap-mandatory scrollbar-hide scroll-smooth gap-3 -mx-4 px-4 pb-2">
+          ${d.entries.map((e, idx) => {
+            return `
+            <button data-action="exercise-select" data-i="${idx}" class="press flex-shrink-0 w-[80%] rounded-2xl bg-surface border-2 ${e.completed ? 'border-plate' : 'border-line'} overflow-hidden snap-center transition-colors hover:border-plate relative">
+              <div class="aspect-video ${e.gif ? 'bg-black/30' : 'bg-raised'} overflow-hidden">
+                ${e.gif ? `<img src="${esc(e.gif)}" alt="${esc(e.exerciseName)}" class="w-full h-full object-cover">` : `<div class="w-full h-full flex items-center justify-center"><p class="text-sm text-mute">Sin imagen</p></div>`}
+                ${e.completed ? `<div class="absolute inset-0 flex items-center justify-center bg-black/40">
+                  ${icon('check', 'w-12 h-12 text-plate')}
+                </div>` : ''}
+                ${timerBadgeFor(idx)}
+              </div>
+              <div class="p-3">
+                <h3 class="font-bold text-base">${esc(e.exerciseName)}</h3>
+              </div>
+            </button>`;
+          }).join('')}
         </div>
-        <span class="shrink-0 text-plate transform transition-transform ${isExpanded ? 'rotate-180' : ''}">${icon('chevron', 'w-5 h-5')}</span>
-      </button>
-      ${isExpanded ? `
-      <div class="bg-raised/20 border-t border-line p-4 space-y-3">
-        ${e.sets.length ? `<div class="grid grid-cols-[3rem_1fr_1fr_3rem] gap-2 text-sm text-mute"><span class="text-center">Serie</span><span class="text-center">Kilos</span><span class="text-center">Reps</span><span></span></div>` : ''}
-        ${rows}
-        <button data-action="set-add" data-i="${i}" class="press mt-3 w-full h-14 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2">${icon('plus', 'w-5 h-5')} Añadir serie</button>
-        <textarea data-field="notes" data-i="${i}" placeholder="Notas sobre este ejercicio..." maxlength="500"
-          class="w-full min-h-[4rem] rounded-xl bg-raised border border-line p-3 text-sm outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
-        <button data-action="ex-toggle" data-i="${i}" class="press w-full h-14 rounded-xl ${e.completed ? 'bg-plate text-ink' : 'bg-raised'} font-bold flex items-center justify-center gap-2">${icon('check', 'w-5 h-5')} ${e.completed ? 'Marcar como pendiente' : 'Completar ejercicio'}</button>
-      </div>` : ''}
-    </article>`;
+      </div>
+
+      <button data-action="workout-save" class="press w-full h-14 rounded-2xl bg-plate text-ink font-bold">Guardar entreno</button>
+      <button data-action="workout-discard" class="press mt-2 w-full h-10 rounded-xl text-danger font-semibold text-sm">Descartar</button>`;
+  }
+
+  // Vista detalle
+  if (ui.selectedExerciseIdx === null) return `<p class="text-mute">Selecciona un ejercicio</p>`;
+  
+  const e = d.entries[ui.selectedExerciseIdx];
+  if (!e) return `<p class="text-mute">Ejercicio no encontrado</p>`;
+
+  const last = lastSets(e.exerciseName);
+  const hint = last ? `Última vez: ${last.sets.map(fmtSet).join(', ')}` : 'Primera vez con este ejercicio';
+  const idx = ui.selectedExerciseIdx;
+
+  const rows = e.sets.map((s, j) => {
+    const p = last ? (last.sets[j] || last.sets[last.sets.length - 1]) : null;
+    return `
+    <div class="rounded-lg bg-raised/50 border border-line/50 p-3 flex items-center gap-2">
+      <span class="text-sm font-semibold text-mute min-w-[3rem]">S${j + 1}:</span>
+      <input data-field="kg" data-i="${idx}" data-j="${j}" inputmode="decimal" autocomplete="off"
+        value="${esc(s.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos serie ${j + 1}"
+        class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
+      <span class="text-sm text-mute">kg</span>
+      <input data-field="reps" data-i="${idx}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
+        value="${esc(s.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Reps serie ${j + 1}"
+        class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
+      <span class="text-sm text-mute">reps</span>
+      <button data-action="set-del" data-i="${idx}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press ml-auto w-10 h-10 grid place-items-center text-danger rounded-lg">${icon('x', 'w-4 h-4')}</button>
+    </div>`;
   }).join('');
 
+  const notesPanel = ui.panels.notes ? `
+    <div class="mb-4">
+      <p class="text-sm font-semibold text-mute mb-2">Notas</p>
+      <textarea data-field="notes" data-i="${idx}" placeholder="Notas..." maxlength="500"
+        class="w-full min-h-[5rem] rounded-xl bg-raised border border-line p-3 text-sm outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
+    </div>` : '';
+
+  const timerPanel = ui.panels.timer ? `
+    <div class="rounded-2xl bg-surface border border-line p-4 mb-4">
+      <p class="text-sm font-semibold text-mute mb-1">Temporizador</p>
+      <p data-timer-display="${idx}" class="num text-5xl font-bold text-center my-2">${fmtClock(timerRemainingFor(idx))}</p>
+      <div class="grid grid-cols-3 gap-2">
+        <button data-action="timer-adjust" data-i="${idx}" data-d="-15" aria-label="Restar 15 segundos" class="press h-12 rounded-xl bg-raised font-bold">−15 s</button>
+        <button data-action="timer-adjust" data-i="${idx}" data-d="15" aria-label="Sumar 15 segundos" class="press h-12 rounded-xl bg-raised font-bold">+15 s</button>
+        <button data-action="timer-reset" data-i="${idx}" class="press h-12 rounded-xl bg-raised font-bold">Reiniciar</button>
+      </div>
+      <button data-action="timer-toggle" data-i="${idx}" data-timer-btn="${idx}" class="press mt-2 w-full h-14 rounded-xl bg-plate text-ink font-bold text-lg">${timerBtnLabel(idx)}</button>
+    </div>` : '';
+
   return `
-    ${cards}
-    <button data-action="workout-save" class="press w-full h-16 rounded-2xl bg-plate text-ink font-bold text-xl">Guardar entreno</button>
-    <button data-action="workout-discard" class="press mt-3 w-full h-12 rounded-xl text-danger font-semibold">Descartar entreno</button>`;
+    <div class="flex items-center gap-2 mb-3">
+      <button data-action="exercise-back" aria-label="Volver" class="press w-10 h-10 rounded-full bg-surface grid place-items-center">${icon('back', 'w-5 h-5')}</button>
+      <h1 class="text-2xl font-bold flex-1 min-w-0 break-words">${esc(e.exerciseName)}</h1>
+      <div class="relative" data-menu>
+        <button data-action="ex-menu" aria-label="Más opciones" aria-haspopup="true" class="press w-10 h-10 rounded-full bg-surface grid place-items-center">${icon('more', 'w-5 h-5')}</button>
+        <div id="exMenu" class="hidden absolute right-0 top-full mt-1 z-20 w-48 rounded-xl bg-raised border border-line shadow-lg overflow-hidden">
+          <button data-action="ex-panel" data-p="notes" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold ${ui.panels.notes ? 'text-plate' : ''}">${icon('edit', 'w-4 h-4')} Notas</button>
+          <button data-action="ex-panel" data-p="timer" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold border-t border-line ${ui.panels.timer ? 'text-plate' : ''}">${icon('clock', 'w-4 h-4')} Temporizador</button>
+        </div>
+      </div>
+    </div>
+
+    ${timerPanel}
+
+    ${e.gif ? `<div class="rounded-2xl bg-black/20 border border-line mb-4 overflow-hidden"><img src="${esc(e.gif)}" alt="${esc(e.exerciseName)}" class="w-full h-48 object-cover"></div>` : `<div class="rounded-2xl bg-raised border border-line mb-4 h-48"></div>`}
+
+    <p class="text-sm text-mute mb-3">${esc(hint)}</p>
+
+    <div class="space-y-2 mb-4">
+      ${rows}
+    </div>
+
+    <button data-action="set-add" data-i="${idx}" class="press w-full h-12 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2 mb-4">${icon('plus', 'w-4 h-4')} Añadir serie</button>
+
+    ${notesPanel}
+
+    <button data-action="ex-toggle" data-i="${idx}" class="press w-full h-12 rounded-xl ${e.completed ? 'bg-plate text-ink' : 'bg-surface'} font-bold">${e.completed ? 'Marcar pendiente' : 'Completar ejercicio'}</button>`;
 }
 
 /* =========================================================
@@ -461,7 +524,8 @@ function viewHistory() {
         const totalSets = w.entries.reduce((sum, e) => sum + e.sets.length, 0);
         return `
         <article class="rounded-2xl bg-surface border border-line overflow-hidden">
-          <button data-action="workout-open" data-id="${esc(w.id)}" class="press w-full text-left p-4 flex items-start justify-between gap-2 hover:bg-raised/30 transition-colors">
+          <div class="flex items-stretch">
+          <button data-action="workout-open" data-id="${esc(w.id)}" class="press flex-1 min-w-0 text-left p-4 flex items-start justify-between gap-2 hover:bg-raised/30 transition-colors">
             <div class="min-w-0 flex-1">
               <h3 class="font-bold">${esc(w.routineName)}</h3>
               <p class="text-sm text-mute">${esc(fmtDate(w.date))}</p>
@@ -469,6 +533,8 @@ function viewHistory() {
             </div>
             <span class="shrink-0 text-plate transform transition-transform ${isExpanded ? 'rotate-180' : ''}">${icon('chevron', 'w-5 h-5')}</span>
           </button>
+          <button data-action="workout-copy" data-id="${esc(w.id)}" aria-label="Copiar entreno como texto" class="press shrink-0 w-14 grid place-items-center text-mute border-l border-line">${icon('copy', 'w-5 h-5')}</button>
+          </div>
           ${isExpanded ? `
           <div class="bg-raised/20 border-t border-line p-4 space-y-4">
             ${w.entries.map((e, idx) => `
@@ -511,73 +577,37 @@ function chart(pts) {
 }
 
 /* =========================================================
-   Pantalla 4: Temporizador de series
+   Temporizador individual por ejercicio (sin re-render por tick)
    ========================================================= */
-const timerState = { running: false, elapsed: 0, phase: 'work', interval: null };
+const exTimer = { idx: null, remaining: 0, running: false, endAt: 0, interval: null };
+const fmtClock = n => `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+const timerRemainingFor = i => {
+  const e = state.draft && state.draft.entries[i];
+  if (!e) return 0;
+  return exTimer.idx === i ? exTimer.remaining : e.timerSec;
+};
+const timerBtnLabel = i => exTimer.idx === i && exTimer.running ? 'Pausar' : (exTimer.idx === i && exTimer.remaining > 0 ? 'Reanudar' : 'Iniciar');
+const timerBadgeFor = i => exTimer.idx === i && (exTimer.running || exTimer.remaining > 0)
+  ? `<span data-timer-badge="${i}" class="num absolute top-2 right-2 px-3 py-1 rounded-full bg-black/70 text-plate font-bold text-sm">${fmtClock(exTimer.remaining)}</span>` : '';
 
-function viewTimer() {
-  if (!state.draft) {
-    return emptyBlock('Primero comienza un entreno', 'En Entrenar elige una rutina para activar el temporizador.',
-      `<button data-action="tab" data-tab="train" class="press mt-6 h-14 px-6 rounded-xl bg-plate text-ink font-bold">Ir a Entrenar</button>`);
+function paintTimer() {
+  document.querySelectorAll('[data-timer-display]').forEach(el => { el.textContent = fmtClock(timerRemainingFor(+el.dataset.timerDisplay)); });
+  document.querySelectorAll('[data-timer-badge]').forEach(el => { el.textContent = fmtClock(timerRemainingFor(+el.dataset.timerBadge)); });
+  document.querySelectorAll('[data-timer-btn]').forEach(el => { el.textContent = timerBtnLabel(+el.dataset.timerBtn); });
+}
+function stopTimerInterval() { if (exTimer.interval) { clearInterval(exTimer.interval); exTimer.interval = null; } }
+function resetTimer() { stopTimerInterval(); exTimer.idx = null; exTimer.remaining = 0; exTimer.running = false; }
+function tickTimer() {
+  if (!exTimer.running) return;
+  if (!state.draft) { resetTimer(); return; }
+  exTimer.remaining = Math.max(0, Math.ceil((exTimer.endAt - Date.now()) / 1000));
+  if (exTimer.remaining <= 0) {
+    stopTimerInterval(); exTimer.running = false;
+    playSound(); vibrate([250, 120, 250]);
+    const e = state.draft.entries[exTimer.idx];
+    toast(`Temporizador terminado${e ? ': ' + e.exerciseName : ''}`);
   }
-
-  const d = state.draft;
-  const hasWork = Number(d.timerWork) > 0;
-  const hasRest = Number(d.timerRest) > 0;
-  const canRun = hasWork || hasRest;
-
-  if (timerState.running) {
-    const total = timerState.phase === 'work' ? Number(d.timerWork) : Number(d.timerRest);
-    const pct = Math.round(100 * timerState.elapsed / total);
-    const color = timerState.phase === 'work' ? '#f2c230' : '#9d9da6';
-    const remaining = Math.max(0, total - timerState.elapsed);
-    const mins = Math.floor(remaining / 60);
-    const secs = remaining % 60;
-
-    return `
-    <div class="mt-8 space-y-6">
-      <div class="text-center">
-        <p class="text-mute text-lg mb-4">${timerState.phase === 'work' ? 'TRABAJO' : 'DESCANSO'}</p>
-        <div class="relative w-64 h-64 mx-auto mb-6">
-          <svg viewBox="0 0 200 200" class="w-full h-full transform -rotate-90">
-            <circle cx="100" cy="100" r="90" fill="none" stroke="#303035" stroke-width="12"/>
-            <circle cx="100" cy="100" r="90" fill="none" stroke="${color}" stroke-width="12" stroke-dasharray="${pct * 5.65} 565" stroke-linecap="round" opacity="0.8"/>
-          </svg>
-          <div class="absolute inset-0 flex flex-col items-center justify-center">
-            <span class="text-6xl font-extrabold num" style="color: ${color}">${mins}:${String(secs).padStart(2, '0')}</span>
-          </div>
-        </div>
-      </div>
-      <div class="grid grid-cols-2 gap-3">
-        <button data-action="timer-pause" class="press h-16 rounded-2xl bg-surface font-bold text-lg">Pausar</button>
-        <button data-action="timer-skip" class="press h-16 rounded-2xl bg-raised font-bold text-lg">Siguiente</button>
-      </div>
-    </div>`;
-  }
-
-  return `
-    <div class="mt-4 space-y-4">
-      <div class="rounded-2xl bg-surface border border-line p-5">
-        <label class="block text-sm font-semibold text-mute mb-2">Tiempo de trabajo (segundos)</label>
-        <input id="timerWork" type="number" inputmode="numeric" min="5" max="300" step="5"
-          value="${Number(d.timerWork) || 60}" aria-label="Segundos de trabajo"
-          class="w-full h-14 rounded-xl bg-raised border border-line text-center text-3xl font-bold num outline-none focus:border-plate">
-      </div>
-
-      <div class="rounded-2xl bg-surface border border-line p-5">
-        <label class="block text-sm font-semibold text-mute mb-2">Tiempo de descanso (segundos)</label>
-        <input id="timerRest" type="number" inputmode="numeric" min="5" max="300" step="5"
-          value="${Number(d.timerRest) || 90}" aria-label="Segundos de descanso"
-          class="w-full h-14 rounded-xl bg-raised border border-line text-center text-3xl font-bold num outline-none focus:border-plate">
-      </div>
-
-      <button data-action="timer-start" ${canRun ? '' : 'disabled'} class="press w-full h-16 rounded-2xl ${canRun ? 'bg-plate text-ink font-bold text-xl' : 'bg-raised text-mute font-semibold'} disabled:opacity-50">Iniciar temporizador</button>
-
-      <div class="text-center text-sm text-mute pt-4">
-        <p>La alarma sonará automáticamente al terminar cada fase.</p>
-        <p class="mt-2 text-xs">Pantalla siempre activa mientras corre el temporizador.</p>
-      </div>
-    </div>`;
+  paintTimer();
 }
 
 /* =========================================================
@@ -656,17 +686,13 @@ async function importFile(file) {
    ========================================================= */
 function renderHeader() {
   let h;
-  const timerBtn = timerState.running ? `<button data-action="timer-stop-all" class="press px-4 h-10 rounded-full bg-danger text-ink font-bold text-sm flex items-center gap-1" aria-label="Parar temporizador">${icon('x', 'w-4 h-4')} Parar</button>` : '';
-  
   if (ui.tab === 'routines') {
     const r = currentRoutine();
     h = r
       ? header(r.name, { back: 'routine-back', right: `<button data-action="routine-rename" class="press w-12 h-12 shrink-0 grid place-items-center rounded-full text-mute" aria-label="Renombrar rutina">${icon('edit')}</button>` })
       : header('Rutinas');
   } else if (ui.tab === 'train') {
-    h = state.draft ? header(state.draft.routineName, { sub: fmtLong(state.draft.startedAt), right: timerBtn }) : header('Entrenar');
-  } else if (ui.tab === 'timer') {
-    h = header('Temporizador', { right: timerBtn });
+    h = state.draft ? header(state.draft.routineName, { sub: fmtLong(state.draft.startedAt) }) : header('Entrenar');
   } else if (ui.tab === 'history') {
     h = header('Histórico');
   } else {
@@ -679,7 +705,6 @@ function viewHtml() {
   switch (ui.tab) {
     case 'routines': { const r = currentRoutine(); return r ? viewRoutineDetail(r) : viewRoutines(); }
     case 'train': return viewTrain();
-    case 'timer': return viewTimer();
     case 'history': return viewHistory();
     default: return viewSettings();
   }
@@ -689,6 +714,39 @@ function render() {
   renderHeader();
   $('#view').innerHTML = viewHtml();
   renderTabs();
+  
+  // Scroll al ejercicio seleccionado en el carrusel
+  if (ui.tab === 'train' && ui.trainMode === 'carousel' && state.draft) {
+    const idx = ui.selectedExerciseIdx !== null && ui.selectedExerciseIdx !== undefined ? ui.selectedExerciseIdx : 0;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const carousel = document.getElementById('exercise-carousel-' + state.draft.id);
+        if (carousel && carousel.children[idx]) {
+          carousel.children[idx].scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
+        }
+      });
+    });
+  }
+}
+function workoutText(w) {
+  const out = [w.routineName, fmtDate(w.date), ''];
+  w.entries.forEach(e => {
+    out.push(e.exerciseName);
+    e.sets.forEach((st, j) => out.push(`S${j + 1}: ${fmt(st.kg)} kg ${st.reps} reps`));
+    if (e.notes) out.push(e.notes);
+    out.push('');
+  });
+  return out.join('\n').trim();
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch (e) { return false; }
 }
 const nav = () => { render(); window.scrollTo(0, 0); };
 
@@ -733,6 +791,14 @@ const actions = {
     state.routines = state.routines.filter(x => x.id !== r.id);
     save(); ui.routineId = null; nav(); toast('Rutina borrada');
   },
+  'ex-gif': async d => {
+    const r = currentRoutine(); if (!r) return;
+    const x = r.exercises.find(e => e.id === d.id); if (!x) return;
+    const gif = await promptDialog({ title: 'URL del GIF/video', value: x.gif || '', placeholder: 'https://ejemplo.com/gif.gif', confirmLabel: 'Guardar' });
+    if (gif === null) return;
+    x.gif = gif.slice(0, 500);
+    save(); render(); toast('GIF actualizado');
+  },
   'ex-rename': async d => {
     const r = currentRoutine(); if (!r) return;
     const x = r.exercises.find(e => e.id === d.id); if (!x) return;
@@ -771,14 +837,24 @@ const actions = {
     }
     state.draft = {
       id: uid(), routineId: r.id, routineName: r.name, startedAt: new Date().toISOString(),
-      timerWork: 60, timerRest: 90,
       entries: r.exercises.map(x => {
         const last = lastSets(x.name);
         const n = Math.min(Math.max(last ? last.sets.length : 1, 1), 8);
-        return { exerciseName: x.name, notes: '', completed: false, sets: Array.from({ length: n }, () => ({ reps: '', kg: '' })) };
+        return { exerciseName: x.name, gif: x.gif || '', notes: '', completed: false, timerSec: 90, sets: Array.from({ length: n }, () => ({ reps: '', kg: '' })) };
       })
     };
-    save(); ui.tab = 'train'; ui.routineId = null; nav();
+    resetTimer(); save(); ui.tab = 'train'; ui.routineId = null; ui.trainMode = 'carousel'; ui.selectedExerciseIdx = null; ui.expandedExercises.clear(); nav();
+  },
+  'exercise-select': d => {
+    ui.selectedExerciseIdx = +d.i;
+    ui.trainMode = 'detail';
+    const ex = state.draft && state.draft.entries[ui.selectedExerciseIdx];
+    ui.panels = { notes: !!(ex && ex.notes), timer: exTimer.idx === ui.selectedExerciseIdx };
+    render();
+  },
+  'exercise-back': () => {
+    ui.trainMode = 'carousel';
+    render();
   },
   'set-add': d => {
     const e = state.draft && state.draft.entries[+d.i]; if (!e) return;
@@ -820,8 +896,8 @@ const actions = {
     })).filter(e => e.sets.length);
     if (!entries.length) { toast('Añade repeticiones en al menos una serie', 'error'); return; }
     state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, entries });
-    state.draft = null;
-    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear();
+    state.draft = null; resetTimer();
+    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); ui.trainMode = 'carousel'; ui.selectedExerciseIdx = null;
     nav(); toast('Entreno guardado');
   },
   'workout-discard': async () => {
@@ -831,10 +907,15 @@ const actions = {
       confirmLabel: 'Descartar entreno', danger: true
     });
     if (!ok) return;
-    state.draft = null; save(); nav();
+    state.draft = null; resetTimer(); ui.trainMode = 'carousel'; ui.selectedExerciseIdx = null; save(); nav();
   },
 
   // --- Histórico
+  'workout-copy': async d => {
+    const w = state.workouts.find(x => x.id === d.id); if (!w) return;
+    const ok = await copyText(workoutText(w));
+    toast(ok ? 'Entreno copiado al portapapeles' : 'No se pudo copiar', ok ? 'ok' : 'error');
+  },
   'workout-open': d => {
     if (ui.expandedSessions.has(d.id)) {
       ui.expandedSessions.delete(d.id);
@@ -856,45 +937,33 @@ const actions = {
     save(); render(); toast('Entreno borrado');
   },
 
-  // --- Temporizador
-  'timer-start': () => {
-    const work = Math.max(5, parseInt($('#timerWork').value) || 60);
-    const rest = Math.max(5, parseInt($('#timerRest').value) || 90);
-    if (state.draft) {
-      state.draft.timerWork = work;
-      state.draft.timerRest = rest;
-      save();
+  // --- Menú y temporizador por ejercicio
+  'ex-menu': () => { const m = $('#exMenu'); if (m) m.classList.toggle('hidden'); },
+  'ex-panel': d => { ui.panels[d.p] = !ui.panels[d.p]; render(); },
+  'timer-toggle': d => {
+    const i = +d.i, e = state.draft && state.draft.entries[i]; if (!e) return;
+    unlockAudio();
+    if (exTimer.idx === i && exTimer.running) {
+      exTimer.remaining = Math.max(0, Math.ceil((exTimer.endAt - Date.now()) / 1000));
+      stopTimerInterval(); exTimer.running = false;
+    } else {
+      if (exTimer.idx !== i || exTimer.remaining <= 0) { stopTimerInterval(); exTimer.idx = i; exTimer.remaining = e.timerSec; }
+      exTimer.endAt = Date.now() + exTimer.remaining * 1000;
+      exTimer.running = true;
+      stopTimerInterval();
+      exTimer.interval = setInterval(tickTimer, 250);
     }
-    timerState.running = true;
-    timerState.elapsed = 0;
-    timerState.phase = 'work';
-    runTimer(work);
-    render();
-    document.documentElement.requestFullscreen().catch(() => {});
+    paintTimer();
   },
-  'timer-pause': () => {
-    if (timerState.interval) clearInterval(timerState.interval);
-    timerState.running = false;
-    render();
+  'timer-reset': d => {
+    if (exTimer.idx === +d.i) resetTimer();
+    paintTimer();
   },
-  'timer-skip': () => {
-    if (timerState.interval) clearInterval(timerState.interval);
-    const d = state.draft;
-    if (!d) return;
-    const nextPhase = timerState.phase === 'work' ? 'rest' : 'work';
-    const nextDuration = nextPhase === 'work' ? Number(d.timerWork) : Number(d.timerRest);
-    if (nextDuration <= 0) { timerState.running = false; render(); return; }
-    timerState.phase = nextPhase === 'work' ? 'work' : 'rest';
-    timerState.elapsed = 0;
-    playSound(); vibrate(200);
-    runTimer(nextDuration);
-    render();
-  },
-  'timer-stop-all': () => {
-    if (timerState.interval) clearInterval(timerState.interval);
-    timerState.running = false;
-    timerState.elapsed = 0;
-    render();
+  'timer-adjust': d => {
+    const i = +d.i, e = state.draft && state.draft.entries[i]; if (!e) return;
+    if (exTimer.idx === i) resetTimer();
+    e.timerSec = clampSec(e.timerSec + Number(d.d));
+    save(); paintTimer();
   },
 
   // --- Ajustes
@@ -921,9 +990,17 @@ function vibrate(ms = 200) {
   try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {}
 }
 
+let audioCtx;
+function unlockAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) {}
+}
 function playSound() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    unlockAudio();
+    const ctx = audioCtx;
     const t = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -937,32 +1014,12 @@ function playSound() {
   } catch (e) {}
 }
 
-function runTimer(duration) {
-  let elapsed = 0;
-  timerState.interval = setInterval(() => {
-    elapsed++;
-    timerState.elapsed = elapsed;
-    render();
-    if (elapsed >= duration) {
-      clearInterval(timerState.interval);
-      playSound();
-      vibrate(300);
-      const d = state.draft;
-      if (!d) { timerState.running = false; render(); return; }
-      const nextPhase = timerState.phase === 'work' ? 'rest' : 'work';
-      const nextDuration = nextPhase === 'work' ? Number(d.timerWork) : Number(d.timerRest);
-      if (nextDuration <= 0) { timerState.running = false; render(); return; }
-      timerState.phase = nextPhase;
-      timerState.elapsed = 0;
-      runTimer(nextDuration);
-    }
-  }, 1000);
-}
-
 /* =========================================================
    Eventos globales
    ========================================================= */
 document.addEventListener('click', e => {
+  const menu = $('#exMenu');
+  if (menu && !menu.classList.contains('hidden') && !e.target.closest('[data-menu]')) menu.classList.add('hidden');
   const el = e.target.closest('[data-action]');
   if (!el) return;
   const fn = actions[el.dataset.action];
@@ -992,12 +1049,6 @@ document.addEventListener('input', e => {
       v = el.dataset.field === 'reps' ? v.replace(/\D/g, '') : v.replace(/[^\d.,]/g, '');
       if (v !== el.value) el.value = v;
       s[el.dataset.field] = v;
-      save();
-    }
-  } else if (el.id === 'timerWork' || el.id === 'timerRest') {
-    if (state.draft) {
-      const key = el.id === 'timerWork' ? 'timerWork' : 'timerRest';
-      state.draft[key] = Math.max(5, Math.round(parseNum(el.value)));
       save();
     }
   } else if (el.id === 'histSearch') {
