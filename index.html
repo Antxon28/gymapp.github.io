@@ -53,6 +53,16 @@
   input::placeholder { color: #5d5d64; }
   .press { transition: transform .08s ease; }
   .press:active { transform: scale(.97); }
+  .carousel-pad::before, .carousel-pad::after { content: ''; flex: 0 0 calc((100% - var(--cw, 80%)) / 2 - 6px); }
+  .card-w { width: var(--cw, 80%); }
+  .train-fit #view { padding-bottom: var(--train-pad, 76px) !important; }
+  .dragging, .dragging body { user-select: none; -webkit-user-select: none; }
+  [data-ex] { -webkit-touch-callout: none; }
+  @keyframes blockFlash { 0% { box-shadow: 0 0 0 3px #f2c230; } 100% { box-shadow: 0 0 0 3px rgba(242,194,48,0); } }
+  .flash-block { animation: blockFlash 1.4s ease-out; }
+  @keyframes focusUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .focus-anim { animation: focusUp .22s ease-out; }
+  .sheet-open, .sheet-open body { overflow: hidden; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
@@ -68,6 +78,16 @@
   <div id="tabs" class="mx-auto max-w-xl grid grid-cols-4"></div>
 </nav>
 
+<div id="focusSheet" class="hidden" style="position:fixed;left:0;right:0;top:0;height:100%;z-index:45">
+  <div data-action="sheet-close" class="absolute inset-0 bg-black/60" style="touch-action:none"></div>
+  <div class="absolute inset-0 flex items-end justify-center pointer-events-none">
+    <section id="focusPanel" role="dialog" aria-modal="true" aria-label="Detalle del ejercicio" class="pointer-events-auto w-full max-w-xl bg-surface border-t border-line rounded-t-3xl flex flex-col" style="height:90%">
+      <div id="focusGrab" class="shrink-0 py-3 grid place-items-center" style="touch-action:none"><span class="block w-12 h-1.5 rounded-full bg-line"></span></div>
+      <div id="focusHead" class="shrink-0"></div>
+      <div id="focusBody" class="min-h-0 flex-1 overflow-y-auto px-4 pt-1" style="overscroll-behavior:contain;padding-bottom:calc(var(--safe-bottom) + 16px)"></div>
+    </section>
+  </div>
+</div>
 <div id="modal-root"></div>
 <div id="toast" role="status" aria-live="polite" style="display:none"></div>
 
@@ -88,6 +108,17 @@ const parseNum = v => { const n = parseFloat(String(v ?? '').replace(',', '.'));
 const validDate = v => { const d = new Date(v); return isNaN(d) ? new Date().toISOString() : d.toISOString(); };
 const fmt = n => Number(n).toLocaleString('es-ES', { maximumFractionDigits: 2 });
 const fmtSet = s => s.kg > 0 ? `${s.reps} × ${fmt(s.kg)} kg` : `${s.reps} reps`;
+const elapsedSec = () => state.draft ? Math.max(0, Math.floor((Date.now() - new Date(state.draft.startedAt).getTime()) / 1000)) : 0;
+const fmtElapsed = sec => {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), ss = sec % 60;
+  const mm = String(m).padStart(2, '0'), s2 = String(ss).padStart(2, '0');
+  return h ? `${h}:${mm}:${s2}` : `${mm}:${s2}`;
+};
+const fmtDuration = sec => {
+  if (sec < 60) return '<1 min';
+  const m = Math.round(sec / 60), h = Math.floor(m / 60);
+  return h ? `${h} h ${String(m % 60).padStart(2, '0')} min` : `${m} min`;
+};
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const fmtDate = iso => {
   const d = new Date(iso);
@@ -120,6 +151,7 @@ const ICONS = {
   download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
   upload: '<path d="M12 16V5M7 9l5-5 5 5M5 20h14"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  grip: '<circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>',
   more: '<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
 };
@@ -139,7 +171,7 @@ function normalize(src) {
     id: String(r.id || uid()),
     name: clean(r.name) || 'Rutina',
     exercises: (Array.isArray(r.exercises) ? r.exercises : [])
-      .map(x => ({ id: String(x.id || uid()), name: clean(x.name) }))
+      .map(x => ({ id: String(x.id || uid()), name: clean(x.name), gif: String(x.gif ?? '').slice(0, 500) }))
       .filter(x => x.name)
   }));
   const workouts = data.workouts.map(w => ({
@@ -147,15 +179,17 @@ function normalize(src) {
     date: validDate(w.date),
     routineId: w.routineId ? String(w.routineId) : null,
     routineName: clean(w.routineName) || 'Entreno',
+    durationSec: Math.max(0, Math.min(172800, Math.round(Number(w.durationSec)) || 0)),
     entries: (Array.isArray(w.entries) ? w.entries : []).map(e => ({
       exerciseName: clean(e.exerciseName),
+      notes: String(e.notes ?? '').slice(0, 500).trim(),
       sets: (Array.isArray(e.sets) ? e.sets : []).map(t => ({ reps: Math.round(parseNum(t.reps)), kg: parseNum(t.kg) }))
-    })).filter(e => e.exerciseName && e.sets.length)
+    })).filter(e => e.exerciseName && (e.sets.length || e.notes))
   })).filter(w => w.entries.length);
   return { routines, workouts };
 }
 
-const clampSec = v => Math.min(1800, Math.max(5, Math.round(Number(v)) || 90));
+const clampSec = (v, def = 90) => Math.min(1800, Math.max(5, Math.round(Number(v)) || def));
 function sanitizeDraft(d) {
   if (!d || !Array.isArray(d.entries)) return null;
   const entries = d.entries.map(e => ({
@@ -163,7 +197,8 @@ function sanitizeDraft(d) {
     gif: String(e.gif ?? '').slice(0, 500),
     notes: String(e.notes ?? '').slice(0, 500).trim(),
     completed: Boolean(e.completed),
-    timerSec: clampSec(e.timerSec),
+    workSec: clampSec(e.workSec, 40),
+    restSec: clampSec(e.restSec ?? e.timerSec, 90),
     sets: (Array.isArray(e.sets) ? e.sets : []).map(s => ({ reps: String(s.reps ?? ''), kg: String(s.kg ?? '') }))
   })).filter(e => e.exerciseName);
   if (!entries.length) return null;
@@ -209,7 +244,7 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 /* =========================================================
    Estado de la interfaz (no se guarda)
    ========================================================= */
-const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set(), trainMode: 'carousel', selectedExerciseIdx: null, panels: { notes: false, timer: false } };
+const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set(), selectedExerciseIdx: null, carouselIdx: 0, panels: { notes: false, timer: false } };
 const currentRoutine = () => {
   const r = state.routines.find(x => x.id === ui.routineId);
   if (!r) ui.routineId = null;
@@ -346,10 +381,10 @@ function viewRoutines() {
 
 function viewRoutineDetail(r) {
   const rows = r.exercises.map(x => `
-    <li class="flex items-center gap-1 rounded-xl bg-surface border border-line pl-4 pr-1 min-h-[3.5rem]">
+    <li data-ex="${esc(x.id)}" class="select-none flex items-center rounded-xl bg-surface border border-line pr-1 min-h-[3.5rem]">
+      <div data-drag-handle tabindex="0" role="button" aria-label="Mover ${esc(x.name)}. Flechas arriba y abajo para reordenar" class="w-11 self-stretch shrink-0 grid place-items-center text-mute cursor-grab" style="touch-action:none">${icon('grip', 'w-5 h-5')}</div>
       <span class="flex-1 min-w-0 text-lg font-semibold truncate">${esc(x.name)}</span>
-      <button data-action="ex-gif" data-id="${esc(x.id)}" aria-label="Editar GIF de ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-plate" title="GIF/video">${icon('edit', 'w-5 h-5')}</button>
-      <button data-action="ex-rename" data-id="${esc(x.id)}" aria-label="Renombrar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-mute">${icon('edit', 'w-5 h-5')}</button>
+      <button data-action="ex-edit" data-id="${esc(x.id)}" aria-label="Editar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-plate">${icon('edit', 'w-5 h-5')}</button>
       <button data-action="ex-del" data-id="${esc(x.id)}" aria-label="Quitar ${esc(x.name)}" class="press w-12 h-12 grid place-items-center rounded-full text-danger">${icon('trash', 'w-5 h-5')}</button>
     </li>`).join('');
 
@@ -359,7 +394,7 @@ function viewRoutineDetail(r) {
         class="flex-1 min-w-0 h-14 rounded-xl bg-surface border border-line px-4 text-lg outline-none focus:border-plate">
       <button type="submit" class="press h-14 px-5 rounded-xl bg-plate text-ink font-bold">Añadir</button>
     </form>
-    <ul class="mt-4 space-y-2">
+    <ul data-ex-list class="mt-4 space-y-2">
       ${rows || '<li class="text-mute text-center py-8">Esta rutina aún no tiene ejercicios. Añade el primero arriba.</li>'}
     </ul>
     <button data-action="routine-delete" class="press mt-8 w-full h-14 rounded-xl border border-danger/50 text-danger font-semibold">Borrar rutina</button>`;
@@ -390,113 +425,26 @@ function viewTrain() {
       </div>`;
   }
 
-  // Mostrar todos los ejercicios en carrusel horizontal
-  if (ui.trainMode === 'carousel') {
-    if (!d.entries.length) {
-      return emptyBlock('Sin ejercicios', 'La rutina no tiene ejercicios.');
-    }
-
-    const carouselId = 'exercise-carousel-' + d.id;
-
-    return `
-      <div class="mb-4">
-        <div id="${carouselId}" class="flex overflow-x-auto snap-x snap-mandatory scrollbar-hide scroll-smooth gap-3 -mx-4 px-4 pb-2">
-          ${d.entries.map((e, idx) => {
-            return `
-            <button data-action="exercise-select" data-i="${idx}" class="press flex-shrink-0 w-[80%] rounded-2xl bg-surface border-2 ${e.completed ? 'border-plate' : 'border-line'} overflow-hidden snap-center transition-colors hover:border-plate relative">
-              <div class="aspect-video ${e.gif ? 'bg-black/30' : 'bg-raised'} overflow-hidden">
-                ${e.gif ? `<img src="${esc(e.gif)}" alt="${esc(e.exerciseName)}" class="w-full h-full object-cover">` : `<div class="w-full h-full flex items-center justify-center"><p class="text-sm text-mute">Sin imagen</p></div>`}
-                ${e.completed ? `<div class="absolute inset-0 flex items-center justify-center bg-black/40">
-                  ${icon('check', 'w-12 h-12 text-plate')}
-                </div>` : ''}
-                ${timerBadgeFor(idx)}
-              </div>
-              <div class="p-3">
-                <h3 class="font-bold text-base">${esc(e.exerciseName)}</h3>
-              </div>
-            </button>`;
-          }).join('')}
-        </div>
-      </div>
-
-      <button data-action="workout-save" class="press w-full h-14 rounded-2xl bg-plate text-ink font-bold">Guardar entreno</button>
-      <button data-action="workout-discard" class="press mt-2 w-full h-10 rounded-xl text-danger font-semibold text-sm">Descartar</button>`;
-  }
-
-  // Vista detalle
-  if (ui.selectedExerciseIdx === null) return `<p class="text-mute">Selecciona un ejercicio</p>`;
-  
-  const e = d.entries[ui.selectedExerciseIdx];
-  if (!e) return `<p class="text-mute">Ejercicio no encontrado</p>`;
-
-  const last = lastSets(e.exerciseName);
-  const hint = last ? `Última vez: ${last.sets.map(fmtSet).join(', ')}` : 'Primera vez con este ejercicio';
-  const idx = ui.selectedExerciseIdx;
-
-  const rows = e.sets.map((s, j) => {
-    const p = last ? (last.sets[j] || last.sets[last.sets.length - 1]) : null;
-    return `
-    <div class="rounded-lg bg-raised/50 border border-line/50 p-3 flex items-center gap-2">
-      <span class="text-sm font-semibold text-mute min-w-[3rem]">S${j + 1}:</span>
-      <input data-field="kg" data-i="${idx}" data-j="${j}" inputmode="decimal" autocomplete="off"
-        value="${esc(s.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos serie ${j + 1}"
-        class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
-      <span class="text-sm text-mute">kg</span>
-      <input data-field="reps" data-i="${idx}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
-        value="${esc(s.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Reps serie ${j + 1}"
-        class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
-      <span class="text-sm text-mute">reps</span>
-      <button data-action="set-del" data-i="${idx}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press ml-auto w-10 h-10 grid place-items-center text-danger rounded-lg">${icon('x', 'w-4 h-4')}</button>
-    </div>`;
-  }).join('');
-
-  const notesPanel = ui.panels.notes ? `
-    <div class="mb-4">
-      <p class="text-sm font-semibold text-mute mb-2">Notas</p>
-      <textarea data-field="notes" data-i="${idx}" placeholder="Notas..." maxlength="500"
-        class="w-full min-h-[5rem] rounded-xl bg-raised border border-line p-3 text-sm outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
-    </div>` : '';
-
-  const timerPanel = ui.panels.timer ? `
-    <div class="rounded-2xl bg-surface border border-line p-4 mb-4">
-      <p class="text-sm font-semibold text-mute mb-1">Temporizador</p>
-      <p data-timer-display="${idx}" class="num text-5xl font-bold text-center my-2">${fmtClock(timerRemainingFor(idx))}</p>
-      <div class="grid grid-cols-3 gap-2">
-        <button data-action="timer-adjust" data-i="${idx}" data-d="-15" aria-label="Restar 15 segundos" class="press h-12 rounded-xl bg-raised font-bold">−15 s</button>
-        <button data-action="timer-adjust" data-i="${idx}" data-d="15" aria-label="Sumar 15 segundos" class="press h-12 rounded-xl bg-raised font-bold">+15 s</button>
-        <button data-action="timer-reset" data-i="${idx}" class="press h-12 rounded-xl bg-raised font-bold">Reiniciar</button>
-      </div>
-      <button data-action="timer-toggle" data-i="${idx}" data-timer-btn="${idx}" class="press mt-2 w-full h-14 rounded-xl bg-plate text-ink font-bold text-lg">${timerBtnLabel(idx)}</button>
-    </div>` : '';
+  if (!d.entries.length) return emptyBlock('Sin ejercicios', 'La rutina no tiene ejercicios.');
 
   return `
-    <div class="flex items-center gap-2 mb-3">
-      <button data-action="exercise-back" aria-label="Volver" class="press w-10 h-10 rounded-full bg-surface grid place-items-center">${icon('back', 'w-5 h-5')}</button>
-      <h1 class="text-2xl font-bold flex-1 min-w-0 break-words">${esc(e.exerciseName)}</h1>
-      <div class="relative" data-menu>
-        <button data-action="ex-menu" aria-label="Más opciones" aria-haspopup="true" class="press w-10 h-10 rounded-full bg-surface grid place-items-center">${icon('more', 'w-5 h-5')}</button>
-        <div id="exMenu" class="hidden absolute right-0 top-full mt-1 z-20 w-48 rounded-xl bg-raised border border-line shadow-lg overflow-hidden">
-          <button data-action="ex-panel" data-p="notes" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold ${ui.panels.notes ? 'text-plate' : ''}">${icon('edit', 'w-4 h-4')} Notas</button>
-          <button data-action="ex-panel" data-p="timer" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold border-t border-line ${ui.panels.timer ? 'text-plate' : ''}">${icon('clock', 'w-4 h-4')} Temporizador</button>
+    <div id="trainWrap" class="flex flex-col">
+      <div class="shrink-0 mb-2 h-12 rounded-xl bg-surface border border-line px-4 flex items-center justify-between">
+        <span class="flex items-center gap-2 text-sm text-mute">${icon('clock', 'w-4 h-4')} Tiempo de entreno</span>
+        <span data-elapsed class="num text-xl font-bold text-plate" aria-label="Tiempo transcurrido">${fmtElapsed(elapsedSec())}</span>
+      </div>
+
+      <div id="trainZone" class="flex-1 min-h-0 flex items-center -mx-4">
+        <div id="exercise-carousel-${d.id}" class="w-full flex items-stretch overflow-x-auto snap-x snap-mandatory scrollbar-hide scroll-smooth carousel-pad" style="height:60vh;height:60dvh">
+          ${d.entries.map(cardHtml).join('')}
         </div>
       </div>
-    </div>
 
-    ${timerPanel}
-
-    ${e.gif ? `<div class="rounded-2xl bg-black/20 border border-line mb-4 overflow-hidden"><img src="${esc(e.gif)}" alt="${esc(e.exerciseName)}" class="w-full h-48 object-cover"></div>` : `<div class="rounded-2xl bg-raised border border-line mb-4 h-48"></div>`}
-
-    <p class="text-sm text-mute mb-3">${esc(hint)}</p>
-
-    <div class="space-y-2 mb-4">
-      ${rows}
-    </div>
-
-    <button data-action="set-add" data-i="${idx}" class="press w-full h-12 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2 mb-4">${icon('plus', 'w-4 h-4')} Añadir serie</button>
-
-    ${notesPanel}
-
-    <button data-action="ex-toggle" data-i="${idx}" class="press w-full h-12 rounded-xl ${e.completed ? 'bg-plate text-ink' : 'bg-surface'} font-bold">${e.completed ? 'Marcar pendiente' : 'Completar ejercicio'}</button>`;
+      <div class="shrink-0 mt-2 flex gap-2">
+        <button data-action="workout-discard" class="press h-12 px-5 rounded-xl border border-danger/50 text-danger font-semibold">Descartar</button>
+        <button data-action="workout-save" class="press flex-1 h-12 rounded-xl bg-plate text-ink font-bold">Guardar entreno</button>
+      </div>
+    </div>`;
 }
 
 /* =========================================================
@@ -529,7 +477,7 @@ function viewHistory() {
             <div class="min-w-0 flex-1">
               <h3 class="font-bold">${esc(w.routineName)}</h3>
               <p class="text-sm text-mute">${esc(fmtDate(w.date))}</p>
-              <p class="text-xs text-mute mt-0.5">${plural(totalExercises, 'ejercicio', 'ejercicios')} • ${totalSets} series</p>
+              <p class="text-xs text-mute mt-0.5">${plural(totalExercises, 'ejercicio', 'ejercicios')} • ${totalSets} series${w.durationSec ? ' • ' + fmtDuration(w.durationSec) : ''}</p>
             </div>
             <span class="shrink-0 text-plate transform transition-transform ${isExpanded ? 'rotate-180' : ''}">${icon('chevron', 'w-5 h-5')}</span>
           </button>
@@ -577,37 +525,291 @@ function chart(pts) {
 }
 
 /* =========================================================
-   Temporizador individual por ejercicio (sin re-render por tick)
+   Temporizador individual por ejercicio: trabajo + descanso entre series
+   (se actualiza en sitio, sin re-render, para no molestar al escribir)
    ========================================================= */
-const exTimer = { idx: null, remaining: 0, running: false, endAt: 0, interval: null };
+const exTimer = { idx: null, phase: 'work', serie: 1, total: 0, remaining: 0, running: false, finished: false, endAt: 0, interval: null };
 const fmtClock = n => `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
 const timerRemainingFor = i => {
   const e = state.draft && state.draft.entries[i];
   if (!e) return 0;
-  return exTimer.idx === i ? exTimer.remaining : e.timerSec;
+  return exTimer.idx === i ? exTimer.remaining : e.workSec;
 };
-const timerBtnLabel = i => exTimer.idx === i && exTimer.running ? 'Pausar' : (exTimer.idx === i && exTimer.remaining > 0 ? 'Reanudar' : 'Iniciar');
-const timerBadgeFor = i => exTimer.idx === i && (exTimer.running || exTimer.remaining > 0)
-  ? `<span data-timer-badge="${i}" class="num absolute top-2 right-2 px-3 py-1 rounded-full bg-black/70 text-plate font-bold text-sm">${fmtClock(exTimer.remaining)}</span>` : '';
+const timerActive = i => exTimer.idx === i && !exTimer.finished && (exTimer.running || exTimer.remaining > 0);
+const timerBtnLabel = i => exTimer.idx === i && exTimer.running ? 'Pausar' : (timerActive(i) ? 'Reanudar' : 'Iniciar');
+const timerPhaseText = i => exTimer.idx !== i ? 'PREPARADO' : exTimer.finished ? 'TERMINADO' : exTimer.phase === 'work' ? 'TRABAJO' : 'DESCANSO';
+const timerSerieText = i => {
+  const e = state.draft && state.draft.entries[i]; const n = e ? e.sets.length : 0;
+  return timerActive(i) ? `Serie ${Math.min(exTimer.serie, n)} de ${n}` : plural(n, 'serie', 'series');
+};
+const timerBadgeText = i => `${exTimer.phase === 'work' ? 'Trabajo' : 'Descanso'} ${fmtClock(timerRemainingFor(i))}`;
+const timerBadgeFor = (i, pos = 'absolute top-2 right-2') =>
+  `<span data-timer-badge="${i}" class="num ${pos} px-3 py-1 rounded-full bg-black/70 text-plate font-bold text-sm ${timerActive(i) ? '' : 'hidden'}">${timerBadgeText(i)}</span>`;
 
 function paintTimer() {
-  document.querySelectorAll('[data-timer-display]').forEach(el => { el.textContent = fmtClock(timerRemainingFor(+el.dataset.timerDisplay)); });
-  document.querySelectorAll('[data-timer-badge]').forEach(el => { el.textContent = fmtClock(timerRemainingFor(+el.dataset.timerBadge)); });
-  document.querySelectorAll('[data-timer-btn]').forEach(el => { el.textContent = timerBtnLabel(+el.dataset.timerBtn); });
+  const all = sel => document.querySelectorAll(sel);
+  all('[data-timer-display]').forEach(el => { el.textContent = fmtClock(timerRemainingFor(+el.dataset.timerDisplay)); });
+  all('[data-timer-phase]').forEach(el => {
+    const i = +el.dataset.timerPhase;
+    el.textContent = timerPhaseText(i);
+    el.className = 'text-sm font-bold tracking-wide ' + (timerActive(i) ? (exTimer.phase === 'work' ? 'text-plate' : 'text-chalk') : 'text-mute');
+  });
+  all('[data-timer-serie]').forEach(el => { el.textContent = timerSerieText(+el.dataset.timerSerie); });
+  all('[data-timer-bar]').forEach(el => {
+    const i = +el.dataset.timerBar;
+    const pct = exTimer.idx === i && exTimer.total ? (exTimer.finished ? 100 : Math.round(100 * (exTimer.total - exTimer.remaining) / exTimer.total)) : 0;
+    el.style.width = pct + '%';
+    el.className = 'h-full rounded-full ' + (exTimer.phase === 'rest' && timerActive(i) ? 'bg-chalk' : 'bg-plate');
+  });
+  all('[data-timer-badge]').forEach(el => {
+    const i = +el.dataset.timerBadge;
+    el.textContent = timerBadgeText(i);
+    el.classList.toggle('hidden', !timerActive(i));
+  });
+  all('[data-timer-btn]').forEach(el => { el.textContent = timerBtnLabel(+el.dataset.timerBtn); });
 }
 function stopTimerInterval() { if (exTimer.interval) { clearInterval(exTimer.interval); exTimer.interval = null; } }
-function resetTimer() { stopTimerInterval(); exTimer.idx = null; exTimer.remaining = 0; exTimer.running = false; }
+function runTimerLoop() { stopTimerInterval(); exTimer.interval = setInterval(tickTimer, 250); }
+function resetTimer() {
+  stopTimerInterval();
+  Object.assign(exTimer, { idx: null, phase: 'work', serie: 1, total: 0, remaining: 0, running: false, finished: false, endAt: 0 });
+}
+function syncTimerCfg(e) {
+  document.querySelectorAll('#focusBody [data-timer-cfg]').forEach(el => {
+    const k = el.dataset.timerCfg;
+    e[k] = clampSec(el.value, k === 'workSec' ? 40 : 90);
+    el.value = e[k];
+  });
+  save();
+}
+// Trabajo de la serie N -> descanso -> trabajo de la serie N+1 ... hasta la última serie
+function nextPhaseOf(e) {
+  if (exTimer.phase === 'work') return exTimer.serie >= e.sets.length ? null : { phase: 'rest', serie: exTimer.serie, dur: e.restSec };
+  return { phase: 'work', serie: exTimer.serie + 1, dur: e.workSec };
+}
 function tickTimer() {
   if (!exTimer.running) return;
-  if (!state.draft) { resetTimer(); return; }
-  exTimer.remaining = Math.max(0, Math.ceil((exTimer.endAt - Date.now()) / 1000));
-  if (exTimer.remaining <= 0) {
-    stopTimerInterval(); exTimer.running = false;
-    playSound(); vibrate([250, 120, 250]);
-    const e = state.draft.entries[exTimer.idx];
-    toast(`Temporizador terminado${e ? ': ' + e.exerciseName : ''}`);
+  const e = state.draft && state.draft.entries[exTimer.idx];
+  if (!e) { resetTimer(); paintTimer(); return; }
+  const now = Date.now();
+  let changed = false, guard = 0;
+  while (exTimer.running && exTimer.endAt <= now && guard++ < 60) {
+    changed = true;
+    const nx = nextPhaseOf(e);
+    if (!nx) { stopTimerInterval(); exTimer.running = false; exTimer.finished = true; exTimer.remaining = 0; break; }
+    exTimer.phase = nx.phase; exTimer.serie = nx.serie; exTimer.total = nx.dur; exTimer.endAt += nx.dur * 1000;
+  }
+  if (exTimer.running) exTimer.remaining = Math.max(0, Math.ceil((exTimer.endAt - now) / 1000));
+  if (changed) {
+    playSound(); vibrate(exTimer.finished ? [300, 120, 300] : 250);
+    if (exTimer.finished) toast(`Temporizador terminado: ${e.exerciseName}`);
   }
   paintTimer();
+}
+
+/* =========================================================
+   Master-Detail: tarjeta del carrusel + panel de enfoque (bottom sheet)
+   ========================================================= */
+const setDone = st => parseNum(st.reps) > 0;
+const progressOf = e => ({ done: e.sets.filter(setDone).length, total: e.sets.length });
+const progressText = e => { const p = progressOf(e); return p.total ? `${p.done}/${p.total} series` : 'Sin series'; };
+const progressLabel = e => { const p = progressOf(e); return `${p.done} de ${p.total} series completadas`; };
+const progressCls = e => 'num absolute top-2 left-2 px-3 py-1 rounded-full font-bold text-xs ' + (e.completed ? 'bg-plate text-ink' : 'bg-black/70 text-chalk');
+
+function cardHtml(e, idx) {
+  const last = lastSets(e.exerciseName);
+  const lastTxt = last ? `Última vez: ${last.sets.map(fmtSet).join(', ')}` : 'Primera vez con este ejercicio';
+  return `
+    <button data-action="exercise-select" data-card="${idx}" data-i="${idx}" class="press shrink-0 card-w h-full mx-1.5 flex flex-col rounded-2xl bg-surface border-2 ${e.completed ? 'border-plate' : 'border-line'} overflow-hidden snap-center text-left">
+      <div class="relative flex-1 min-h-0 ${e.gif ? 'bg-black/30' : 'bg-raised'} overflow-hidden">
+        ${e.gif ? `<img src="${esc(e.gif)}" alt="${esc(e.exerciseName)}" class="absolute inset-0 w-full h-full object-cover">` : `<div class="absolute inset-0 flex items-center justify-center"><p class="text-sm text-mute">Sin imagen</p></div>`}
+        <span data-progress aria-label="${esc(progressLabel(e))}" class="${progressCls(e)}">${progressText(e)}</span>
+        ${timerBadgeFor(idx)}
+      </div>
+      <div class="shrink-0 p-4">
+        <h3 class="font-bold text-xl truncate">${esc(e.exerciseName)}</h3>
+        <p class="text-sm text-mute truncate mt-0.5">${esc(lastTxt)}</p>
+      </div>
+    </button>`;
+}
+
+// Actualiza la tarjeta en sitio (sin reconstruir el carrusel ni reiniciar el GIF)
+function paintCard(i) {
+  const e = state.draft && state.draft.entries[i];
+  const card = document.querySelector(`[data-card="${i}"]`);
+  if (!e || !card) return;
+  const b = card.querySelector('[data-progress]');
+  if (b) { b.textContent = progressText(e); b.className = progressCls(e); b.setAttribute('aria-label', progressLabel(e)); }
+  card.classList.toggle('border-plate', !!e.completed);
+  card.classList.toggle('border-line', !e.completed);
+}
+
+function focusHeadHtml(e, i) {
+  return `
+    <div class="flex items-center gap-2 px-4 pb-3">
+      <h2 class="text-xl font-bold flex-1 min-w-0 break-words leading-tight">${esc(e.exerciseName)}</h2>
+      ${ui.panels.timer ? '' : timerBadgeFor(i, 'shrink-0')}
+      <div class="relative shrink-0" data-menu>
+        <button data-action="ex-menu" aria-label="Más opciones" aria-haspopup="true" class="press w-10 h-10 rounded-full bg-raised grid place-items-center">${icon('more', 'w-5 h-5')}</button>
+        <div id="exMenu" class="hidden absolute right-0 top-full mt-1 z-20 w-48 rounded-xl bg-raised border border-line shadow-lg overflow-hidden">
+          <button data-action="ex-panel" data-p="notes" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold ${ui.panels.notes ? 'text-plate' : ''}">${icon('edit', 'w-4 h-4')} Notas</button>
+          <button data-action="ex-panel" data-p="timer" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold border-t border-line ${ui.panels.timer ? 'text-plate' : ''}">${icon('clock', 'w-4 h-4')} Temporizador</button>
+        </div>
+      </div>
+      <button data-action="sheet-close" aria-label="Cerrar" class="press shrink-0 w-10 h-10 rounded-full bg-raised grid place-items-center">${icon('x', 'w-5 h-5')}</button>
+    </div>`;
+}
+
+function focusBodyHtml(e, idx) {
+  const last = lastSets(e.exerciseName);
+  const rows = e.sets.map((st, j) => {
+    const p = last ? (last.sets[j] || last.sets[last.sets.length - 1]) : null;
+    return `
+    <div class="rounded-lg bg-raised/50 border border-line/50 p-3 flex items-center gap-2">
+      <span class="text-sm font-semibold text-mute min-w-[2.5rem]">S${j + 1}:</span>
+      <input data-field="kg" data-i="${idx}" data-j="${j}" inputmode="decimal" autocomplete="off"
+        value="${esc(st.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos serie ${j + 1}"
+        class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
+      <span class="text-sm text-mute">kg</span>
+      <input data-field="reps" data-i="${idx}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
+        value="${esc(st.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Reps serie ${j + 1}"
+        class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
+      <span class="text-sm text-mute">reps</span>
+      <button data-action="set-del" data-i="${idx}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press ml-auto w-10 h-10 grid place-items-center text-danger rounded-lg">${icon('x', 'w-4 h-4')}</button>
+    </div>`;
+  }).join('');
+
+  const cfgInput = (key, label, val) => `
+        <label class="block">
+          <span class="block text-xs text-mute mb-1">${label}</span>
+          <input data-timer-cfg="${key}" data-i="${idx}" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="${val}" aria-label="${label}"
+            class="w-full h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
+        </label>`;
+
+  const timerPanel = ui.panels.timer ? `
+    <div data-block="timer" class="rounded-2xl bg-raised border border-line p-3 mb-3">
+      <p class="text-sm font-semibold text-mute mb-2">Temporizador</p>
+      <div class="grid grid-cols-2 gap-2">
+        ${cfgInput('workSec', 'Trabajo (seg)', e.workSec)}
+        ${cfgInput('restSec', 'Descanso entre series (seg)', e.restSec)}
+      </div>
+      <div class="text-center mt-3">
+        <p data-timer-phase="${idx}" class="text-sm font-bold tracking-wide text-mute">${timerPhaseText(idx)}</p>
+        <p data-timer-display="${idx}" class="num text-5xl font-bold my-1">${fmtClock(timerRemainingFor(idx))}</p>
+        <p data-timer-serie="${idx}" class="text-xs text-mute">${esc(timerSerieText(idx))}</p>
+        <div class="h-1.5 rounded-full bg-ink mt-3 overflow-hidden"><div data-timer-bar="${idx}" class="h-full rounded-full bg-plate" style="width:0%"></div></div>
+      </div>
+      <div class="grid grid-cols-3 gap-2 mt-3">
+        <button data-action="timer-toggle" data-i="${idx}" data-timer-btn="${idx}" class="press h-12 rounded-xl bg-plate text-ink font-bold">${timerBtnLabel(idx)}</button>
+        <button data-action="timer-skip" data-i="${idx}" class="press h-12 rounded-xl bg-surface font-bold">Siguiente</button>
+        <button data-action="timer-reset" data-i="${idx}" class="press h-12 rounded-xl bg-surface font-bold">Reiniciar</button>
+      </div>
+    </div>` : '';
+
+  const notesPanel = ui.panels.notes ? `
+    <div data-block="notes" class="rounded-2xl bg-raised border border-line p-3 mb-3">
+      <p class="text-sm font-semibold text-mute mb-2">Notas</p>
+      <textarea data-field="notes" data-i="${idx}" rows="3" placeholder="Notas..." maxlength="500" aria-label="Notas del ejercicio"
+        class="w-full min-h-[5rem] rounded-xl bg-ink border border-line p-3 text-base outline-none focus:border-plate resize-none">${esc(e.notes)}</textarea>
+    </div>` : '';
+
+  return `
+    <div class="space-y-2 mb-3">${rows}</div>
+    <button data-action="set-add" data-i="${idx}" class="press w-full h-12 rounded-xl bg-raised font-semibold flex items-center justify-center gap-2 mb-3">${icon('plus', 'w-4 h-4')} Añadir serie</button>
+    ${notesPanel}${timerPanel}
+    <button data-action="ex-toggle" data-i="${idx}" class="press w-full h-12 rounded-xl ${e.completed ? 'bg-plate text-ink' : 'bg-raised'} font-bold">${e.completed ? 'Marcar pendiente' : 'Completar ejercicio'}</button>`;
+}
+
+function renderFocusSheet() {
+  const i = ui.selectedExerciseIdx, d = state.draft;
+  const e = d && i !== null ? d.entries[i] : null;
+  if (!e) { closeFocus(); return; }
+  const body = $('#focusBody'), top = body.scrollTop;
+  $('#focusHead').innerHTML = focusHeadHtml(e, i);
+  body.innerHTML = focusBodyHtml(e, i);
+  body.scrollTop = top;
+  paintTimer();
+}
+
+// Al abrir Notas/Temporizador: recorre el panel hasta el bloque y lo resalta un instante
+function revealBlock(name) {
+  requestAnimationFrame(() => {
+    const body = $('#focusBody'), el = body && body.querySelector(`[data-block="${name}"]`);
+    if (!el) return;
+    const delta = el.getBoundingClientRect().top - body.getBoundingClientRect().top;
+    body.scrollTo({ top: Math.max(0, body.scrollTop + delta - 12), behavior: 'smooth' });
+    el.classList.remove('flash-block'); void el.offsetWidth; el.classList.add('flash-block');
+  });
+}
+
+// Actualiza la tarjeta y, si está abierto, el panel; nunca reconstruye el carrusel
+function refresh(i) {
+  paintCard(i);
+  if (ui.selectedExerciseIdx !== null) renderFocusSheet();
+}
+
+// Entrenar: todo cabe en pantalla. Tarjeta = 60 % del alto (o menos si no cabe), centrada.
+function fitTrain(fresh) {
+  const wrap = document.getElementById('trainWrap');
+  const root = document.documentElement;
+  root.classList.toggle('train-fit', !!wrap);
+  if (!wrap || ui.selectedExerciseIdx !== null) return;      // con el panel abierto no se toca el fondo
+  const vv = window.visualViewport, vh = Math.round(vv ? vv.height : innerHeight);
+  const nav = document.querySelector('nav'), navH = nav ? nav.offsetHeight : 64;
+  root.style.setProperty('--train-pad', (navH + 12) + 'px');
+  const car0 = $('#trainZone') && $('#trainZone').firstElementChild;
+  let prevMid = 0;
+  if (!fresh && car0) {
+    const r0 = car0.getBoundingClientRect(); prevMid = r0.left + r0.width / 2;
+    [...car0.children].forEach(c => { const r = c.getBoundingClientRect(); c._mid = r.left + r.width / 2; });
+  }
+  const top = wrap.getBoundingClientRect().top + window.scrollY;
+  wrap.style.height = Math.max(vh - top - navH - 12, 380) + 'px';
+  const zone = $('#trainZone'), car = zone && zone.firstElementChild; if (!car) return;
+  const h = Math.max(160, Math.min(Math.round(vh * 0.6), zone.clientHeight));
+  car.style.height = h + 'px';
+  car.style.setProperty('--cw', Math.round(Math.min(car.clientWidth * 0.8, h * 0.78)) + 'px');
+  // Mantiene centrada la tarjeta que se estaba viendo (o la última abierta si se acaba de reconstruir)
+  const cards = [...car.children];
+  if (!cards.length) return;
+  let cur = Math.min(ui.carouselIdx, cards.length - 1);
+  if (!fresh) {
+    const mid = prevMid; let best = Infinity;
+    cards.forEach((c, i) => { const d = Math.abs(c._mid - mid); if (d < best) { best = d; cur = i; } });
+  }
+  cards[cur].scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
+}
+const onViewportChange = () => { fitFocus(); fitTrain(false); };
+
+function fitFocus() {
+  const root = $('#focusSheet');
+  if (!root || root.classList.contains('hidden')) return;
+  const vv = window.visualViewport;
+  root.style.top = (vv ? vv.offsetTop : 0) + 'px';
+  root.style.height = vv ? vv.height + 'px' : '100%';
+}
+
+function openFocus(i) {
+  const e = state.draft && state.draft.entries[i]; if (!e) return;
+  ui.selectedExerciseIdx = i; ui.carouselIdx = i;
+  ui.panels = { notes: !!e.notes, timer: exTimer.idx === i };
+  renderFocusSheet();
+  const panel = $('#focusPanel');
+  $('#focusSheet').classList.remove('hidden');
+  panel.style.transform = '';
+  panel.classList.remove('focus-anim'); void panel.offsetWidth; panel.classList.add('focus-anim');
+  document.documentElement.classList.add('sheet-open');
+  $('#focusBody').scrollTop = 0;
+  fitFocus();
+}
+
+function closeFocus() {
+  ui.selectedExerciseIdx = null;
+  const root = $('#focusSheet'); if (root) root.classList.add('hidden');
+  const panel = $('#focusPanel'); if (panel) { panel.style.transform = ''; panel.style.transition = ''; }
+  document.documentElement.classList.remove('sheet-open');
+  fitTrain(false);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
 }
 
 /* =========================================================
@@ -714,22 +916,21 @@ function render() {
   renderHeader();
   $('#view').innerHTML = viewHtml();
   renderTabs();
-  
-  // Scroll al ejercicio seleccionado en el carrusel
-  if (ui.tab === 'train' && ui.trainMode === 'carousel' && state.draft) {
-    const idx = ui.selectedExerciseIdx !== null && ui.selectedExerciseIdx !== undefined ? ui.selectedExerciseIdx : 0;
+  fitTrain(true);
+
+  // Si se reconstruye el carrusel (p. ej. al volver de otra pestaña), recupera la última tarjeta abierta
+  if (ui.tab === 'train' && state.draft && ui.carouselIdx > 0) {
+    const idx = ui.carouselIdx;
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const carousel = document.getElementById('exercise-carousel-' + state.draft.id);
-        if (carousel && carousel.children[idx]) {
-          carousel.children[idx].scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
-        }
-      });
+      const c = document.getElementById('exercise-carousel-' + state.draft.id);
+      if (c && c.children[idx]) c.children[idx].scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
     });
   }
 }
 function workoutText(w) {
-  const out = [w.routineName, fmtDate(w.date), ''];
+  const out = [w.routineName, fmtDate(w.date)];
+  if (w.durationSec) out.push('Duración: ' + fmtDuration(w.durationSec));
+  out.push('');
   w.entries.forEach(e => {
     out.push(e.exerciseName);
     e.sets.forEach((st, j) => out.push(`S${j + 1}: ${fmt(st.kg)} kg ${st.reps} reps`));
@@ -756,7 +957,7 @@ const nav = () => { render(); window.scrollTo(0, 0); };
 const actions = {
   tab: d => {
     ui.tab = d.tab; ui.routineId = null; ui.workoutId = null; ui.filter = ''; 
-    if (d.tab !== 'train') ui.expandedExercises.clear();
+    if (d.tab !== 'train') { ui.expandedExercises.clear(); closeFocus(); }
     nav();
   },
 
@@ -791,18 +992,10 @@ const actions = {
     state.routines = state.routines.filter(x => x.id !== r.id);
     save(); ui.routineId = null; nav(); toast('Rutina borrada');
   },
-  'ex-gif': async d => {
+  'ex-edit': async d => {
     const r = currentRoutine(); if (!r) return;
     const x = r.exercises.find(e => e.id === d.id); if (!x) return;
-    const gif = await promptDialog({ title: 'URL del GIF/video', value: x.gif || '', placeholder: 'https://ejemplo.com/gif.gif', confirmLabel: 'Guardar' });
-    if (gif === null) return;
-    x.gif = gif.slice(0, 500);
-    save(); render(); toast('GIF actualizado');
-  },
-  'ex-rename': async d => {
-    const r = currentRoutine(); if (!r) return;
-    const x = r.exercises.find(e => e.id === d.id); if (!x) return;
-    const name = clean(await promptDialog({ title: 'Renombrar ejercicio', value: x.name, confirmLabel: 'Guardar' }));
+    const name = clean(await promptDialog({ title: 'Editar ejercicio', value: x.name, confirmLabel: 'Guardar' }));
     if (!name || name === x.name) return;
     if (r.exercises.some(e => e !== x && norm(e.name) === norm(name))) { toast('Ese ejercicio ya está en la rutina', 'error'); return; }
     x.name = name; save(); render(); toast('Nombre guardado');
@@ -840,43 +1033,27 @@ const actions = {
       entries: r.exercises.map(x => {
         const last = lastSets(x.name);
         const n = Math.min(Math.max(last ? last.sets.length : 1, 1), 8);
-        return { exerciseName: x.name, gif: x.gif || '', notes: '', completed: false, timerSec: 90, sets: Array.from({ length: n }, () => ({ reps: '', kg: '' })) };
+        return { exerciseName: x.name, gif: x.gif || '', notes: '', completed: false, workSec: 40, restSec: 90, sets: Array.from({ length: n }, () => ({ reps: '', kg: '' })) };
       })
     };
-    resetTimer(); save(); ui.tab = 'train'; ui.routineId = null; ui.trainMode = 'carousel'; ui.selectedExerciseIdx = null; ui.expandedExercises.clear(); nav();
+    resetTimer(); save(); ui.tab = 'train'; ui.routineId = null; closeFocus(); ui.carouselIdx = 0; ui.expandedExercises.clear(); nav();
   },
-  'exercise-select': d => {
-    ui.selectedExerciseIdx = +d.i;
-    ui.trainMode = 'detail';
-    const ex = state.draft && state.draft.entries[ui.selectedExerciseIdx];
-    ui.panels = { notes: !!(ex && ex.notes), timer: exTimer.idx === ui.selectedExerciseIdx };
-    render();
-  },
-  'exercise-back': () => {
-    ui.trainMode = 'carousel';
-    render();
-  },
+  'exercise-select': d => openFocus(+d.i),
+  'sheet-close': () => closeFocus(),
   'set-add': d => {
     const e = state.draft && state.draft.entries[+d.i]; if (!e) return;
-    const prev = e.sets[e.sets.length - 1];
-    e.sets.push(prev ? { reps: prev.reps, kg: prev.kg } : { reps: '', kg: '' });
-    save(); render();
+    e.sets.push({ reps: '', kg: '' });
+    save(); refresh(+d.i);
   },
   'set-del': d => {
     const e = state.draft && state.draft.entries[+d.i]; if (!e) return;
-    e.sets.splice(+d.j, 1); save(); render();
+    e.sets.splice(+d.j, 1); save(); refresh(+d.i);
   },
   'ex-toggle': d => {
     const e = state.draft && state.draft.entries[+d.i];
     if (!e) return;
     e.completed = !e.completed;
-    const exId = state.draft.id + '-ex-' + d.i;
-    if (e.completed) {
-      ui.expandedExercises.delete(exId);
-    } else {
-      ui.expandedExercises.add(exId);
-    }
-    save(); render();
+    save(); refresh(+d.i);
   },
   'ex-expand': d => {
     const exId = state.draft.id + '-ex-' + d.i;
@@ -891,13 +1068,13 @@ const actions = {
     const d = state.draft; if (!d) return;
     const entries = d.entries.map(e => ({
       exerciseName: e.exerciseName,
-      notes: e.notes || '',
+      notes: String(e.notes || '').trim().slice(0, 500),
       sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
-    })).filter(e => e.sets.length);
+    })).filter(e => e.sets.length || e.notes);
     if (!entries.length) { toast('Añade repeticiones en al menos una serie', 'error'); return; }
-    state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, entries });
+    state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, durationSec: elapsedSec(), entries });
     state.draft = null; resetTimer();
-    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); ui.trainMode = 'carousel'; ui.selectedExerciseIdx = null;
+    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); closeFocus(); ui.carouselIdx = 0;
     nav(); toast('Entreno guardado');
   },
   'workout-discard': async () => {
@@ -907,7 +1084,7 @@ const actions = {
       confirmLabel: 'Descartar entreno', danger: true
     });
     if (!ok) return;
-    state.draft = null; resetTimer(); ui.trainMode = 'carousel'; ui.selectedExerciseIdx = null; save(); nav();
+    state.draft = null; resetTimer(); closeFocus(); ui.carouselIdx = 0; save(); nav();
   },
 
   // --- Histórico
@@ -939,31 +1116,39 @@ const actions = {
 
   // --- Menú y temporizador por ejercicio
   'ex-menu': () => { const m = $('#exMenu'); if (m) m.classList.toggle('hidden'); },
-  'ex-panel': d => { ui.panels[d.p] = !ui.panels[d.p]; render(); },
+  'ex-panel': d => {
+    const opening = !ui.panels[d.p];
+    ui.panels[d.p] = opening;
+    renderFocusSheet();
+    if (opening) revealBlock(d.p);
+  },
   'timer-toggle': d => {
     const i = +d.i, e = state.draft && state.draft.entries[i]; if (!e) return;
     unlockAudio();
+    syncTimerCfg(e);
     if (exTimer.idx === i && exTimer.running) {
       exTimer.remaining = Math.max(0, Math.ceil((exTimer.endAt - Date.now()) / 1000));
       stopTimerInterval(); exTimer.running = false;
-    } else {
-      if (exTimer.idx !== i || exTimer.remaining <= 0) { stopTimerInterval(); exTimer.idx = i; exTimer.remaining = e.timerSec; }
+    } else if (timerActive(i)) {
       exTimer.endAt = Date.now() + exTimer.remaining * 1000;
-      exTimer.running = true;
+      exTimer.running = true; runTimerLoop();
+    } else {
       stopTimerInterval();
-      exTimer.interval = setInterval(tickTimer, 250);
+      Object.assign(exTimer, { idx: i, phase: 'work', serie: 1, total: e.workSec, remaining: e.workSec, finished: false, running: true, endAt: Date.now() + e.workSec * 1000 });
+      runTimerLoop();
     }
     paintTimer();
+  },
+  'timer-skip': d => {
+    const i = +d.i; if (!timerActive(i)) return;
+    unlockAudio();
+    if (!exTimer.running) { exTimer.running = true; runTimerLoop(); }
+    exTimer.endAt = Date.now();
+    tickTimer();
   },
   'timer-reset': d => {
     if (exTimer.idx === +d.i) resetTimer();
     paintTimer();
-  },
-  'timer-adjust': d => {
-    const i = +d.i, e = state.draft && state.draft.entries[i]; if (!e) return;
-    if (exTimer.idx === i) resetTimer();
-    e.timerSec = clampSec(e.timerSec + Number(d.d));
-    save(); paintTimer();
   },
 
   // --- Ajustes
@@ -1026,6 +1211,120 @@ document.addEventListener('click', e => {
   if (fn) fn(el.dataset, el);
 });
 
+/* ---- Reordenar ejercicios: mantener pulsado o arrastrar desde el asa izquierda ---- */
+const drag = { active: false, pending: null, timer: null, row: null, list: null, grab: 0, y: 0, raf: 0, suppressUntil: 0 };
+
+function applyExerciseOrder(ids) {
+  const r = currentRoutine(); if (!r) return;
+  const byId = new Map(r.exercises.map(x => [x.id, x]));
+  const next = ids.map(id => byId.get(id)).filter(Boolean);
+  if (next.length === r.exercises.length && ids.some((id, i) => id !== r.exercises[i].id)) { r.exercises = next; save(); }
+  render();
+}
+function dragCancelPending() { clearTimeout(drag.timer); drag.timer = null; drag.pending = null; }
+function dragBegin() {
+  const pd = drag.pending; dragCancelPending();
+  if (!pd || !pd.row.isConnected) return;
+  drag.active = true; drag.row = pd.row; drag.list = pd.row.parentElement; drag.y = pd.y;
+  drag.grab = pd.y - pd.row.getBoundingClientRect().top;
+  pd.row.classList.add('ring-2', 'ring-plate', 'shadow-xl', 'z-10', 'relative', 'bg-raised');
+  pd.row.style.transition = 'none';
+  document.documentElement.classList.add('dragging');
+  try { navigator.vibrate && navigator.vibrate(15); } catch (_) {}
+  dragLoop();
+}
+function dragUpdate() {
+  const row = drag.row; if (!row) return;
+  row.style.transform = '';
+  const h = row.offsetHeight, want = drag.y - drag.grab, center = want + h / 2;
+  let prev = row.previousElementSibling, next = row.nextElementSibling, guard = 0;
+  while (prev && guard++ < 50 && center < prev.getBoundingClientRect().top + prev.offsetHeight / 2) { drag.list.insertBefore(row, prev); prev = row.previousElementSibling; }
+  next = row.nextElementSibling;
+  while (next && guard++ < 100 && center > next.getBoundingClientRect().top + next.offsetHeight / 2) { drag.list.insertBefore(next, row); next = row.nextElementSibling; }
+  row.style.transform = `translateY(${want - row.getBoundingClientRect().top}px)`;
+}
+function dragLoop() {
+  if (!drag.active) return;
+  const top = 150, bottom = innerHeight - 140;
+  if (drag.y < top) window.scrollBy(0, -Math.min(18, (top - drag.y) / 5));
+  else if (drag.y > bottom) window.scrollBy(0, Math.min(18, (drag.y - bottom) / 5));
+  dragUpdate();
+  drag.raf = requestAnimationFrame(dragLoop);
+}
+function dragEnd() {
+  if (!drag.active) return;
+  cancelAnimationFrame(drag.raf);
+  drag.active = false; drag.suppressUntil = Date.now() + 400;
+  document.documentElement.classList.remove('dragging');
+  const ids = [...drag.list.children].map(li => li.dataset.ex).filter(Boolean);
+  drag.row = null;
+  applyExerciseOrder(ids);
+}
+document.addEventListener('pointerdown', ev => {
+  const row = ev.target.closest && ev.target.closest('[data-ex]');
+  if (!row || drag.active || (ev.pointerType === 'mouse' && ev.button !== 0)) return;
+  const onHandle = !!ev.target.closest('[data-drag-handle]');
+  if (!onHandle && ev.target.closest('button, a, input, textarea')) return;
+  drag.pending = { row, x: ev.clientX, y: ev.clientY };
+  if (onHandle) dragBegin();
+  else drag.timer = setTimeout(dragBegin, 380);
+});
+document.addEventListener('pointermove', ev => {
+  if (drag.active) { drag.y = ev.clientY; return; }
+  const pd = drag.pending;
+  if (pd && Math.hypot(ev.clientX - pd.x, ev.clientY - pd.y) > 10) dragCancelPending();   // era un scroll
+  else if (pd) { pd.x = ev.clientX; pd.y = ev.clientY; }
+});
+['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, () => { dragCancelPending(); dragEnd(); }));
+document.addEventListener('touchmove', ev => { if (drag.active) ev.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', ev => { if (ev.target.closest && ev.target.closest('[data-ex]')) ev.preventDefault(); });
+document.addEventListener('click', ev => { if (Date.now() < drag.suppressUntil) { ev.stopPropagation(); ev.preventDefault(); } }, true);
+// Teclado / lector de pantalla: flechas sobre el asa
+document.addEventListener('keydown', ev => {
+  const h = ev.target.closest && ev.target.closest('[data-drag-handle]');
+  if (!h || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
+  ev.preventDefault();
+  const li = h.closest('[data-ex]'), r = currentRoutine(); if (!li || !r) return;
+  const ids = r.exercises.map(x => x.id), i = ids.indexOf(li.dataset.ex), j = i + (ev.key === 'ArrowUp' ? -1 : 1);
+  if (i < 0 || j < 0 || j >= ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  applyExerciseOrder(ids);
+  const again = document.querySelector(`[data-ex="${CSS.escape(li.dataset.ex)}"] [data-drag-handle]`); if (again) again.focus();
+});
+
+/* ---- Contador de tiempo del entrenamiento (calculado desde startedAt: sobrevive a recargas) ---- */
+const paintElapsed = () => document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = fmtElapsed(elapsedSec()); });
+setInterval(() => { if (state.draft) paintElapsed(); }, 500);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) paintElapsed(); });
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', onViewportChange);
+  window.visualViewport.addEventListener('scroll', fitFocus);
+}
+window.addEventListener('resize', onViewportChange);
+window.addEventListener('orientationchange', () => setTimeout(onViewportChange, 150));
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.selectedExerciseIdx !== null) closeFocus(); });
+
+// Deslizar hacia abajo desde el asa cierra el panel
+(() => {
+  const grab = $('#focusGrab'), panel = $('#focusPanel');
+  let y0 = null, dy = 0;
+  grab.addEventListener('pointerdown', ev => { y0 = ev.clientY; dy = 0; panel.style.transition = 'none'; grab.setPointerCapture(ev.pointerId); });
+  grab.addEventListener('pointermove', ev => {
+    if (y0 === null) return;
+    dy = Math.max(0, ev.clientY - y0);
+    panel.style.transform = `translateY(${dy}px)`;
+  });
+  const end = () => {
+    if (y0 === null) return;
+    const far = dy > 90; y0 = null; dy = 0;
+    panel.style.transition = '';
+    if (far) closeFocus(); else panel.style.transform = '';
+  };
+  grab.addEventListener('pointerup', end);
+  grab.addEventListener('pointercancel', end);
+})();
+
 document.addEventListener('submit', e => {
   const f = e.target.closest('form[data-form]');
   if (!f) return;
@@ -1049,8 +1348,10 @@ document.addEventListener('input', e => {
       v = el.dataset.field === 'reps' ? v.replace(/\D/g, '') : v.replace(/[^\d.,]/g, '');
       if (v !== el.value) el.value = v;
       s[el.dataset.field] = v;
-      save();
+      save(); paintCard(+el.dataset.i);
     }
+  } else if (el.dataset.timerCfg) {
+    el.value = el.value.replace(/\D/g, '').slice(0, 4);
   } else if (el.id === 'histSearch') {
     ui.filter = el.value;
     render();
@@ -1058,6 +1359,11 @@ document.addEventListener('input', e => {
 });
 
 document.addEventListener('change', e => {
+  const cfg = e.target.dataset && e.target.dataset.timerCfg;
+  if (cfg && state.draft) {
+    const en = state.draft.entries[+e.target.dataset.i];
+    if (en) { en[cfg] = clampSec(e.target.value, cfg === 'workSec' ? 40 : 90); e.target.value = en[cfg]; save(); paintTimer(); }
+  }
   if (e.target.id === 'importFile') {
     const f = e.target.files && e.target.files[0];
     e.target.value = '';
