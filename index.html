@@ -37,11 +37,49 @@
 </script>
 <style>
   :root { --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px); }
-  html { background: #121212; -webkit-text-size-adjust: 100%; }
+  html {
+    background: #121212;
+    -webkit-text-size-adjust: 100%;
+    -webkit-user-select: text;
+    -webkit-touch-callout: none;
+    height: 100%;
+    width: 100%;
+  }
   body {
-    background: #121212; color: #ececee;
+    background: #121212;
+    color: #ececee;
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    -webkit-tap-highlight-color: transparent; touch-action: manipulation; overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    overscroll-behavior-y: none;
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    -webkit-user-select: text;
+  }
+  * { box-sizing: border-box; }
+  button, input, textarea, select {
+    font: inherit;
+    color: inherit;
+    -webkit-appearance: none;
+    -webkit-border-radius: 8px;
+    font-size: 16px;
+  }
+  input[type="text"], input[type="email"], input[type="number"], textarea, select {
+    padding: 8px 12px;
+    border: 1px solid #303035;
+    background: #121212;
+    border-radius: 8px;
+    min-height: 44px;
+    width: 100%;
+  }
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: #f2c230;
+    box-shadow: 0 0 0 2px rgba(242, 194, 48, 0.1);
   }
   button, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
@@ -51,6 +89,18 @@
   .scrollbar-hide::-webkit-scrollbar { display: none; }
   .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   input::placeholder { color: #5d5d64; }
+  img, svg { max-width: 100%; height: auto; display: block; }
+  main { max-width: 100%; width: 100%; }
+  .mx-auto { margin-left: auto; margin-right: auto; }
+  @media (orientation: landscape) and (max-height: 500px) {
+    #header { min-height: 56px; padding: 8px 16px; }
+    nav { height: 48px; }
+    nav button { height: 44px; font-size: 12px; }
+    #view { padding-bottom: max(56px, calc(var(--safe-bottom) + 56px)) !important; }
+  }
+  @supports (padding: env(safe-area-inset-bottom)) {
+    body { padding-bottom: env(safe-area-inset-bottom); }
+  }
   .press { transition: transform .08s ease; }
   .press:active { transform: scale(.97); }
   .carousel-pad::before, .carousel-pad::after { content: ''; flex: 0 0 calc((100% - var(--cw, 80%)) / 2 - 6px); }
@@ -69,19 +119,19 @@
 
 <body class="bg-ink text-chalk antialiased">
 
-<div class="mx-auto w-full max-w-xl min-h-screen flex flex-col">
+<div class="mx-auto w-full min-h-screen flex flex-col" style="max-width:100%">
   <header id="header" class="sticky top-0 z-20 bg-ink/95 backdrop-blur px-4 pb-3" style="padding-top: calc(var(--safe-top) + 12px)"></header>
   <main id="view" class="flex-1 px-4" style="padding-bottom: calc(var(--safe-bottom) + 112px)"></main>
 </div>
 
-<nav class="fixed bottom-0 inset-x-0 z-30 bg-ink border-t border-line" style="padding-bottom: var(--safe-bottom)" aria-label="Navegación principal">
+<nav class="fixed bottom-0 inset-x-0 z-30 bg-ink border-t border-line" style="padding-bottom:var(--safe-bottom);width:100%;box-sizing:border-box" aria-label="Navegación principal">
   <div id="tabs" class="mx-auto max-w-xl grid grid-cols-4"></div>
 </nav>
 
 <div id="focusSheet" class="hidden" style="position:fixed;left:0;right:0;top:0;height:100%;z-index:45">
   <div data-action="sheet-close" class="absolute inset-0 bg-black/60" style="touch-action:none"></div>
   <div class="absolute inset-0 flex items-end justify-center pointer-events-none">
-    <section id="focusPanel" role="dialog" aria-modal="true" aria-label="Detalle del ejercicio" class="pointer-events-auto w-full max-w-xl bg-surface border-t border-line rounded-t-3xl flex flex-col" style="height:90%">
+    <section id="focusPanel" role="dialog" aria-modal="true" aria-label="Detalle del ejercicio" class="pointer-events-auto w-full bg-surface border-t border-line rounded-t-3xl flex flex-col" style="height:90%;max-width:100%">
       <div id="focusGrab" class="shrink-0 py-3 grid place-items-center" style="touch-action:none"><span class="block w-12 h-1.5 rounded-full bg-line"></span></div>
       <div id="focusHead" class="shrink-0"></div>
       <div id="focusBody" class="min-h-0 flex-1 overflow-y-auto px-4 pt-1" style="overscroll-behavior:contain;padding-bottom:calc(var(--safe-bottom) + 16px)"></div>
@@ -1054,6 +1104,7 @@ const actions = {
     if (!e) return;
     e.completed = !e.completed;
     save(); refresh(+d.i);
+    if (e.completed) closeFocus();
   },
   'ex-expand': d => {
     const exId = state.draft.id + '-ex-' + d.i;
