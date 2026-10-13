@@ -719,10 +719,12 @@ function focusBodyHtml(e, idx) {
       <span class="text-sm font-semibold text-mute min-w-[2.5rem]">S${j + 1}:</span>
       <input data-field="kg" data-i="${idx}" data-j="${j}" inputmode="decimal" autocomplete="off"
         value="${esc(st.kg)}" placeholder="${p ? fmt(p.kg) : 0}" aria-label="Kilos serie ${j + 1}"
+        onfocus="this.setSelectionRange(this.value.length, this.value.length)"
         class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
       <span class="text-sm text-mute">kg</span>
       <input data-field="reps" data-i="${idx}" data-j="${j}" inputmode="numeric" pattern="[0-9]*" autocomplete="off"
         value="${esc(st.reps)}" placeholder="${p ? p.reps : 0}" aria-label="Reps serie ${j + 1}"
+        onfocus="this.setSelectionRange(this.value.length, this.value.length)"
         class="w-20 h-12 rounded-lg bg-ink border border-line text-center text-lg font-bold num outline-none focus:border-plate">
       <span class="text-sm text-mute">reps</span>
       <button data-action="set-del" data-i="${idx}" data-j="${j}" aria-label="Quitar serie ${j + 1}" class="press ml-auto w-10 h-10 grid place-items-center text-danger rounded-lg">${icon('x', 'w-4 h-4')}</button>
@@ -1092,7 +1094,13 @@ const actions = {
   'sheet-close': () => closeFocus(),
   'set-add': d => {
     const e = state.draft && state.draft.entries[+d.i]; if (!e) return;
-    e.sets.push({ reps: '', kg: '' });
+    // Copiar datos de la serie anterior si existen
+    const lastSet = e.sets.length > 0 ? e.sets[e.sets.length - 1] : null;
+    const newSet = {
+      kg: (lastSet && lastSet.kg) ? lastSet.kg : '',
+      reps: (lastSet && lastSet.reps) ? lastSet.reps : ''
+    };
+    e.sets.push(newSet);
     save(); refresh(+d.i);
   },
   'set-del': d => {
