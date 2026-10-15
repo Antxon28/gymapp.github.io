@@ -247,6 +247,7 @@ function sanitizeDraft(d) {
     gif: String(e.gif ?? '').slice(0, 500),
     notes: String(e.notes ?? '').slice(0, 500).trim(),
     completed: Boolean(e.completed),
+    added: Boolean(e.added),
     workSec: clampSec(e.workSec, 40),
     restSec: clampSec(e.restSec ?? e.timerSec, 90),
     sets: (Array.isArray(e.sets) ? e.sets : []).map(s => ({ reps: String(s.reps ?? ''), kg: String(s.kg ?? '') }))
@@ -294,7 +295,7 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 /* =========================================================
    Estado de la interfaz (no se guarda)
    ========================================================= */
-const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set(), selectedExerciseIdx: null, carouselIdx: 0, panels: { notes: false, timer: false } };
+const ui = { tab: 'routines', routineId: null, workoutId: null, filter: '', expandedSessions: new Set(), expandedExercises: new Set(), selectedExerciseIdx: null, carouselIdx: 0, panels: { notes: false, timer: false }, newExercisesAdded: [] };
 const currentRoutine = () => {
   const r = state.routines.find(x => x.id === ui.routineId);
   if (!r) ui.routineId = null;
@@ -479,9 +480,18 @@ function viewTrain() {
 
   return `
     <div id="trainWrap" class="flex flex-col">
-      <div class="shrink-0 mb-2 h-12 rounded-xl bg-surface border border-line px-4 flex items-center justify-between">
-        <span class="flex items-center gap-2 text-sm text-mute">${icon('clock', 'w-4 h-4')} Tiempo de entreno</span>
-        <span data-elapsed class="num text-xl font-bold text-plate" aria-label="Tiempo transcurrido">${fmtElapsed(elapsedSec())}</span>
+      <div class="shrink-0 mb-2 flex items-center justify-between gap-2">
+        <div class="flex-1 h-12 rounded-xl bg-surface border border-line px-4 flex items-center justify-between">
+          <span class="flex items-center gap-2 text-sm text-mute">${icon('clock', 'w-4 h-4')} Tiempo</span>
+          <span data-elapsed class="num text-lg font-bold text-plate">${fmtElapsed(elapsedSec())}</span>
+        </div>
+        <div class="relative shrink-0">
+          <button data-action="workout-menu" class="press w-12 h-12 rounded-full bg-raised grid place-items-center">${icon('more', 'w-5 h-5')}</button>
+          <div id="workoutMenu" class="hidden absolute right-0 top-full mt-1 z-20 w-48 rounded-xl bg-raised border border-line shadow-lg overflow-hidden">
+            <button data-action="ex-add-menu" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold">${icon('plus', 'w-4 h-4')} Añadir ejercicio</button>
+            <button data-action="workout-discard-from-menu" class="press w-full h-12 px-4 flex items-center gap-3 text-left font-semibold text-danger border-t border-line">${icon('x', 'w-4 h-4')} Descartar</button>
+          </div>
+        </div>
       </div>
 
       <div id="trainZone" class="flex-1 min-h-0 flex items-center -mx-4">
@@ -490,9 +500,8 @@ function viewTrain() {
         </div>
       </div>
 
-      <div class="shrink-0 mt-2 flex gap-2">
-        <button data-action="workout-discard" class="press h-12 px-5 rounded-xl border border-danger/50 text-danger font-semibold">Descartar</button>
-        <button data-action="workout-save" class="press flex-1 h-12 rounded-xl bg-plate text-ink font-bold">Guardar entreno</button>
+      <div class="shrink-0 mt-2">
+        <button data-action="workout-save" class="press w-full h-12 rounded-xl bg-plate text-ink font-bold">Guardar entreno</button>
       </div>
     </div>`;
 }
@@ -1131,10 +1140,24 @@ const actions = {
       sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
     })).filter(e => e.sets.length || e.notes);
     if (!entries.length) { toast('Añade repeticiones en al menos una serie', 'error'); return; }
+    
+    // Si hay nuevos ejercicios, mostrar modal de elección
+    if (d.entries.some(e => e.added)) {
+      const modal = $('#saveChoiceModal');
+      if (modal) modal.classList.remove('hidden');
+      return;
+    }
+    
+    // Si no hay nuevos ejercicios, guardar directamente
     state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, durationSec: elapsedSec(), entries });
     state.draft = null; resetTimer();
     save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); closeFocus(); ui.carouselIdx = 0;
     nav(); toast('Entreno guardado');
+  },
+  'workout-discard-from-menu': async () => {
+    const menu = $('#workoutMenu');
+    if (menu) menu.classList.add('hidden');
+    actions['workout-discard']();
   },
   'workout-discard': async () => {
     const ok = await confirmDialog({
@@ -1208,6 +1231,156 @@ const actions = {
   'timer-reset': d => {
     if (exTimer.idx === +d.i) resetTimer();
     paintTimer();
+  },
+
+  // --- Menú de agregar ejercicio
+  'workout-menu': () => { const m = $('#workoutMenu'); if (m) m.classList.toggle('hidden'); },
+  'ex-add-menu': () => {
+    const menu = $('#workoutMenu');
+    if (menu) menu.classList.add('hidden');
+    const modal = $('#addExerciseModal');
+    if (modal) {
+      modal.classList.remove('hidden');
+      const input = $('#newExerciseName');
+      if (input) { input.value = ''; input.focus(); }
+    }
+  },
+  'add-ex-cancel': () => {
+    const modal = $('#addExerciseModal');
+    if (modal) modal.classList.add('hidden');
+  },
+  'add-ex-confirm': () => {
+    const input = $('#newExerciseName');
+    const name = input ? input.value.trim() : '';
+    if (!name) { toast('Escribe el nombre del ejercicio', 'error'); return; }
+    
+    const d = state.draft; if (!d) return;
+    const newIdx = d.entries.length;
+    d.entries.push({
+      exerciseName: name,
+      notes: '',
+      completed: false,
+      workSec: 40,
+      restSec: 90,
+      added: true,
+      sets: [{ reps: '', kg: '' }]
+    });
+    ui.newExercisesAdded.push(newIdx);
+    save();
+    
+    const modal = $('#addExerciseModal');
+    if (modal) modal.classList.add('hidden');
+    
+    // Cerrar el menú de opciones
+    const menu = $('#workoutMenu');
+    if (menu) menu.classList.add('hidden');
+    
+    // Redibujar el carrusel con el nuevo ejercicio
+    render();
+    
+    // Scroll al nuevo ejercicio (SIN abrir el panel)
+    setTimeout(() => {
+      const car = document.getElementById('exercise-carousel-' + d.id);
+      if (car && car.children[newIdx]) {
+        car.children[newIdx].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      }
+    }, 50);
+    
+    toast('Ejercicio añadido');
+  },
+
+  'save-new-routine': () => {
+    const modal = $('#saveChoiceModal');
+    if (modal) modal.classList.add('hidden');
+    
+    const nameModal = $('#newRoutineModal');
+    if (nameModal) nameModal.classList.remove('hidden');
+    
+    const input = $('#newRoutineName');
+    if (input) { input.value = ''; input.focus(); }
+  },
+  'update-routine': () => {
+    const modal = $('#saveChoiceModal');
+    if (modal) modal.classList.add('hidden');
+    
+    const d = state.draft; if (!d) return;
+    const entries = d.entries.map(e => ({
+      exerciseName: e.exerciseName,
+      notes: String(e.notes || '').trim().slice(0, 500),
+      sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
+    })).filter(e => e.sets.length || e.notes);
+    
+    // Actualizar la rutina existente con los nuevos ejercicios
+    const routine = state.routines.find(r => r.id === d.routineId);
+    if (routine) {
+      d.entries.filter(e => e.added).forEach(newEx => {
+        if (newEx) {
+          routine.exercises.push({ id: uid(), name: newEx.exerciseName, gif: '' });
+        }
+      });
+    }
+    
+    // Guardar el workout
+    state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, durationSec: elapsedSec(), entries });
+    state.draft = null; resetTimer();
+    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); ui.newExercisesAdded = []; closeFocus(); ui.carouselIdx = 0;
+    nav(); toast('Rutina actualizada y entreno guardado');
+  },
+  'routine-name-cancel': () => {
+    const modal = $('#newRoutineModal');
+    if (modal) modal.classList.add('hidden');
+  },
+  'routine-name-confirm': () => {
+    const input = $('#newRoutineName');
+    const name = input ? input.value.trim() : '';
+    if (!name) { toast('Escribe el nombre de la rutina', 'error'); return; }
+    
+    const d = state.draft; if (!d) return;
+    const entries = d.entries.map(e => ({
+      exerciseName: e.exerciseName,
+      notes: String(e.notes || '').trim().slice(0, 500),
+      sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
+    })).filter(e => e.sets.length || e.notes);
+    
+    // Crear nueva rutina
+    const newRoutineId = uid();
+    const exercises = d.entries.map((ex, idx) => ({ id: uid(), name: ex.exerciseName, gif: '' }));
+    state.routines.push({ id: newRoutineId, name, exercises });
+    
+    // Guardar el workout con la nueva rutina
+    state.workouts.push({ id: uid(), date: d.startedAt, routineId: newRoutineId, routineName: name, durationSec: elapsedSec(), entries });
+    state.draft = null; resetTimer();
+    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); ui.newExercisesAdded = []; closeFocus(); ui.carouselIdx = 0;
+    
+    const modal = $('#newRoutineModal');
+    if (modal) modal.classList.add('hidden');
+    
+    nav(); toast('Nueva rutina creada y entreno guardado');
+  },
+  
+  'save-only': () => {
+    const d = state.draft; if (!d) return;
+    const entries = d.entries.map(e => ({
+      exerciseName: e.exerciseName,
+      notes: String(e.notes || '').trim().slice(0, 500),
+      sets: e.sets.map(s => ({ reps: Math.round(parseNum(s.reps)), kg: parseNum(s.kg) })).filter(s => s.reps > 0)
+    })).filter(e => e.sets.length || e.notes);
+    if (!entries.length) { toast('Añade repeticiones en al menos una serie', 'error'); return; }
+    
+    // Cerrar modal
+    const modal = $('#saveChoiceModal');
+    if (modal) modal.classList.add('hidden');
+    
+    // Guardar solo el workout, sin crear/actualizar rutina
+    state.workouts.push({ id: uid(), date: d.startedAt, routineId: d.routineId, routineName: d.routineName, durationSec: elapsedSec(), entries });
+    state.draft = null; resetTimer();
+    save(); ui.tab = 'history'; ui.workoutId = null; ui.filter = ''; ui.expandedExercises.clear(); ui.newExercisesAdded = []; closeFocus(); ui.carouselIdx = 0;
+    nav(); toast('Entreno guardado');
+  },
+  
+  'save-choice-cancel': () => {
+    const modal = $('#saveChoiceModal');
+    if (modal) modal.classList.add('hidden');
   },
 
   // --- Ajustes
@@ -1436,5 +1609,46 @@ document.addEventListener('change', e => {
 render();
 })();
 </script>
+
+  <!-- Modal para añadir nuevo ejercicio durante entrenamiento -->
+  <div id="addExerciseModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60" style="touch-action:none">
+    <div class="bg-surface border border-line rounded-2xl p-6 w-11/12 max-w-sm shadow-xl">
+      <h3 class="text-xl font-bold mb-4">Añadir nuevo ejercicio</h3>
+      <input id="newExerciseName" type="text" placeholder="Nombre del ejercicio" maxlength="50"
+        class="w-full h-12 rounded-xl bg-ink border border-line px-3 mb-4 outline-none focus:border-plate" autofocus>
+      <div class="flex gap-2">
+        <button data-action="add-ex-cancel" class="press flex-1 h-12 rounded-xl border border-line font-semibold">Cancelar</button>
+        <button data-action="add-ex-confirm" class="press flex-1 h-12 rounded-xl bg-plate text-ink font-bold">Añadir</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal para elegir: nueva rutina o actualizar -->
+  <div id="saveChoiceModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60" style="touch-action:none">
+    <div class="bg-surface border border-line rounded-2xl p-6 w-11/12 max-w-sm shadow-xl">
+      <h3 class="text-lg font-bold mb-2">Se detectaron ejercicios nuevos</h3>
+      <p class="text-sm text-mute mb-6">¿Qué deseas hacer?</p>
+      <div class="flex flex-col gap-2">
+        <button data-action="save-new-routine" class="press h-12 rounded-xl bg-plate text-ink font-bold">Guardar como nueva rutina</button>
+        <button data-action="update-routine" class="press h-12 rounded-xl bg-raised border border-line font-semibold">Actualizar rutina existente</button>
+        <button data-action="save-only" class="press h-12 rounded-xl bg-raised border border-line font-semibold">Solo guardar entreno</button>
+      </div>
+      <button data-action="save-choice-cancel" class="press mt-4 w-full text-center text-danger font-semibold text-sm">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- Modal para nombre de nueva rutina -->
+  <div id="newRoutineModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60" style="touch-action:none">
+    <div class="bg-surface border border-line rounded-2xl p-6 w-11/12 max-w-sm shadow-xl">
+      <h3 class="text-xl font-bold mb-4">Nombre de la nueva rutina</h3>
+      <input id="newRoutineName" type="text" placeholder="Ej: Sentadillas y prensa" maxlength="50"
+        class="w-full h-12 rounded-xl bg-ink border border-line px-3 mb-4 outline-none focus:border-plate" autofocus>
+      <div class="flex gap-2">
+        <button data-action="routine-name-cancel" class="press flex-1 h-12 rounded-xl border border-line font-semibold">Cancelar</button>
+        <button data-action="routine-name-confirm" class="press flex-1 h-12 rounded-xl bg-plate text-ink font-bold">Crear rutina</button>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
