@@ -342,18 +342,21 @@ function toast(msg, kind = 'ok') {
 function sheet(inner, { input = false } = {}) {
   return new Promise(resolve => {
     const wrap = document.createElement('div');
-    wrap.className = 'fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70';
-    wrap.innerHTML = `<form role="dialog" aria-modal="true" class="w-full max-w-xl sm:max-w-md bg-surface border border-line rounded-t-3xl sm:rounded-3xl p-5" style="padding-bottom: calc(var(--safe-bottom) + 20px)">${inner}</form>`;
+    wrap.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70';
+    wrap.dataset.overlay = '1';
+    wrap.innerHTML = `<form role="dialog" aria-modal="true" class="w-full max-w-sm bg-surface border border-line rounded-3xl p-5">${inner}</form>`;
     const form = wrap.firstElementChild;
-    const done = v => { document.removeEventListener('keydown', onKey); wrap.remove(); resolve(v); };
+    const done = v => { document.removeEventListener('keydown', onKey); wrap.remove(); syncBodyLock(); resolve(v); };
     const onKey = e => { if (e.key === 'Escape') done(null); };
     document.addEventListener('keydown', onKey);
     wrap.addEventListener('click', e => { if (e.target === wrap) done(null); });
     form.addEventListener('submit', e => { e.preventDefault(); done(input ? form.elements.namedItem('value').value : true); });
     form.querySelector('[data-cancel]').addEventListener('click', () => done(null));
     $('#modal-root').appendChild(wrap);
+    fitOverlay(wrap);
+    syncBodyLock();
     const f = form.elements.namedItem('value');
-    if (f) { f.focus(); f.select(); }
+    if (f) f.focus();
   });
 }
 
@@ -674,6 +677,7 @@ const progressOf = e => ({ done: e.sets.filter(setDone).length, total: e.sets.le
 const progressText = e => { const p = progressOf(e); return p.total ? `${p.done}/${p.total} series` : 'Sin series'; };
 const progressLabel = e => { const p = progressOf(e); return `${p.done} de ${p.total} series completadas`; };
 const progressCls = e => 'num absolute top-2 left-2 px-3 py-1 rounded-full font-bold text-xs ' + (e.completed ? 'bg-plate text-ink' : 'bg-black/70 text-chalk');
+const progressStyle = e => e.completed ? 'background:#f2c230;color:#121212;z-index:2' : 'background:rgba(0,0,0,.7);color:#ececee;z-index:2';
 
 function cardHtml(e, idx) {
   const last = lastSets(e.exerciseName);
@@ -682,7 +686,7 @@ function cardHtml(e, idx) {
     <button data-action="exercise-select" data-card="${idx}" data-i="${idx}" class="press shrink-0 card-w h-full mx-1.5 flex flex-col rounded-2xl bg-surface border-2 ${e.completed ? 'border-plate' : 'border-line'} overflow-hidden snap-center text-left">
       <div class="relative flex-1 min-h-0 ${e.gif ? 'bg-black/30' : 'bg-raised'} overflow-hidden">
         ${e.gif ? `<img src="${esc(e.gif)}" alt="${esc(e.exerciseName)}" class="absolute inset-0 w-full h-full object-cover">` : `<div class="absolute inset-0 flex items-center justify-center"><p class="text-sm text-mute">Sin imagen</p></div>`}
-        <span data-progress aria-label="${esc(progressLabel(e))}" class="${progressCls(e)}">${progressText(e)}</span>
+        <span data-progress aria-label="${esc(progressLabel(e))}" class="${progressCls(e)}" style="${progressStyle(e)}">${progressText(e)}</span>
         ${timerBadgeFor(idx)}
       </div>
       <div class="shrink-0 p-4">
@@ -698,7 +702,7 @@ function paintCard(i) {
   const card = document.querySelector(`[data-card="${i}"]`);
   if (!e || !card) return;
   const b = card.querySelector('[data-progress]');
-  if (b) { b.textContent = progressText(e); b.className = progressCls(e); b.setAttribute('aria-label', progressLabel(e)); }
+  if (b) { b.textContent = progressText(e); b.className = progressCls(e); b.setAttribute('style', progressStyle(e)); b.setAttribute('aria-label', progressLabel(e)); }
   card.classList.toggle('border-plate', !!e.completed);
   card.classList.toggle('border-line', !e.completed);
 }
@@ -840,7 +844,14 @@ function fitTrain(fresh) {
   }
   cards[cur].scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
 }
-const onViewportChange = () => { fitFocus(); fitTrain(false); };
+const onViewportChange = () => {
+  fitOpenOverlays();
+  if (addModalOpen()) return;   // el teclado del modal no debe recolocar el fondo
+  fitFocus();
+  fitTrain(false);
+  const a = document.activeElement;
+  if (a && a.closest && a.closest('#focusBody')) a.scrollIntoView({ block: 'center' });
+};
 
 function fitFocus() {
   const root = $('#focusSheet');
@@ -978,6 +989,7 @@ function render() {
   $('#view').innerHTML = viewHtml();
   renderTabs();
   fitTrain(true);
+  syncBodyLock();
 
   // Si se reconstruye el carrusel (p. ej. al volver de otra pestaña), recupera la última tarjeta abierta
   if (ui.tab === 'train' && state.draft && ui.carouselIdx > 0) {
@@ -1011,6 +1023,40 @@ async function copyText(t) {
   } catch (e) { return false; }
 }
 const nav = () => { render(); window.scrollTo(0, 0); };
+
+/* =========================================================
+   Bloqueo del fondo mientras hay un pop-up con teclado
+   ========================================================= */
+let scrollLockY = null;
+function lockBody(on) {
+  const b = document.body;
+  if (on && scrollLockY === null) {
+    scrollLockY = window.scrollY;
+    Object.assign(b.style, { position: 'fixed', top: `-${scrollLockY}px`, left: '0', right: '0', width: '100%' });
+  } else if (!on && scrollLockY !== null) {
+    Object.assign(b.style, { position: '', top: '', left: '', right: '', width: '' });
+    window.scrollTo(0, scrollLockY);
+    scrollLockY = null;
+  }
+}
+const addModalOpen = () => { const m = $('#addExerciseModal'); return !!m && !m.classList.contains('hidden'); };
+
+// Los pop-ups ocupan solo la zona visible (por encima del teclado) y quedan centrados en ella
+function fitOverlay(el) {
+  const vv = window.visualViewport;
+  el.style.top = (vv ? vv.offsetTop : 0) + 'px';
+  el.style.height = (vv ? vv.height : innerHeight) + 'px';
+}
+function fitOpenOverlays() {
+  document.querySelectorAll('[data-overlay], #addExerciseModal, #saveChoiceModal, #newRoutineModal').forEach(fitOverlay);
+}
+// Bloquea el fondo mientras haya algún pop-up abierto (si no, iOS desplaza la página al enfocar el campo)
+function syncBodyLock() {
+  const staticOpen = ['#addExerciseModal', '#saveChoiceModal', '#newRoutineModal'].some(s => {
+    const m = $(s); return !!m && !m.classList.contains('hidden');
+  });
+  lockBody(!!document.querySelector('[data-overlay]') || staticOpen);
+}
 
 /* =========================================================
    Acciones
@@ -1145,6 +1191,8 @@ const actions = {
     if (d.entries.some(e => e.added)) {
       const modal = $('#saveChoiceModal');
       if (modal) modal.classList.remove('hidden');
+      fitOverlay(modal);
+      syncBodyLock();
       return;
     }
     
@@ -1241,6 +1289,8 @@ const actions = {
     const modal = $('#addExerciseModal');
     if (modal) {
       modal.classList.remove('hidden');
+      lockBody(true);
+      fitOverlay(modal);
       const input = $('#newExerciseName');
       if (input) { input.value = ''; input.focus(); }
     }
@@ -1248,6 +1298,7 @@ const actions = {
   'add-ex-cancel': () => {
     const modal = $('#addExerciseModal');
     if (modal) modal.classList.add('hidden');
+    lockBody(false);
   },
   'add-ex-confirm': () => {
     const input = $('#newExerciseName');
@@ -1270,6 +1321,7 @@ const actions = {
     
     const modal = $('#addExerciseModal');
     if (modal) modal.classList.add('hidden');
+    lockBody(false);
     
     // Cerrar el menú de opciones
     const menu = $('#workoutMenu');
@@ -1295,6 +1347,8 @@ const actions = {
     
     const nameModal = $('#newRoutineModal');
     if (nameModal) nameModal.classList.remove('hidden');
+    if (nameModal) fitOverlay(nameModal);
+    syncBodyLock();
     
     const input = $('#newRoutineName');
     if (input) { input.value = ''; input.focus(); }
@@ -1329,6 +1383,7 @@ const actions = {
   'routine-name-cancel': () => {
     const modal = $('#newRoutineModal');
     if (modal) modal.classList.add('hidden');
+    syncBodyLock();
   },
   'routine-name-confirm': () => {
     const input = $('#newRoutineName');
@@ -1381,6 +1436,7 @@ const actions = {
   'save-choice-cancel': () => {
     const modal = $('#saveChoiceModal');
     if (modal) modal.classList.add('hidden');
+    syncBodyLock();
   },
 
   // --- Ajustes
@@ -1509,6 +1565,14 @@ document.addEventListener('pointermove', ev => {
 });
 ['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, () => { dragCancelPending(); dragEnd(); }));
 document.addEventListener('touchmove', ev => { if (drag.active) ev.preventDefault(); }, { passive: false });
+['focusin', 'visibilitychange'].forEach(t => document.addEventListener(t, () => { dragCancelPending(); dragEnd(); }));
+// Campos del panel de enfoque: se recentran en la zona visible al enfocarlos (sobre el teclado)
+document.addEventListener('focusin', ev => {
+  const t = ev.target;
+  if (t.closest && t.closest('#focusBody')) {
+    setTimeout(() => t.scrollIntoView({ block: 'center', behavior: 'smooth' }), 350);
+  }
+});
 document.addEventListener('contextmenu', ev => { if (ev.target.closest && ev.target.closest('[data-ex]')) ev.preventDefault(); });
 document.addEventListener('click', ev => { if (Date.now() < drag.suppressUntil) { ev.stopPropagation(); ev.preventDefault(); } }, true);
 // Teclado / lector de pantalla: flechas sobre el asa
@@ -1531,7 +1595,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) pain
 
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', onViewportChange);
-  window.visualViewport.addEventListener('scroll', fitFocus);
+  window.visualViewport.addEventListener('scroll', () => { fitFocus(); fitOpenOverlays(); });
 }
 window.addEventListener('resize', onViewportChange);
 window.addEventListener('orientationchange', () => setTimeout(onViewportChange, 150));
